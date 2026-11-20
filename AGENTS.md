@@ -50,6 +50,11 @@ Alternative: if the user has already arranged a layout in Windows, save it with
 - Autostart: create a shortcut in `shell:startup` (`[Environment]::GetFolderPath('Startup')`)
   named `Monitor Mode Switcher.lnk`, target `wscript.exe`, argument `"<full path>\MonitorModeSwitcher.vbs"`.
 - `moveWindows` (bool), `settleDelayMs` (500–15000, raise it if windows land wrong).
+- `startupAction`: `"last"` (restore `lastMode`, default), `"mode"` (always `startupMode`), `"none"`.
+- `controllerPrompt` (bool) + `controllerMode` (mode name): when an Xbox/XInput controller connects
+  and the current mode isn't `controllerMode`, show a controller-navigable prompt.
+- `controllerMenuCombo` (bool): View + Menu on the controller opens the mode menu.
+- `lastMode` is written by the app on every switch; don't edit it.
 
 ## 4. Verify
 

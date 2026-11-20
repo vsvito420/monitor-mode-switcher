@@ -4,10 +4,13 @@ A tiny Windows tray tool that switches between saved multi-monitor layouts with 
 — e.g. **Desk** (1440p main + side monitor on the right) and **Bed/Couch** (TV or 1080p main + side monitor on the left).
 
 - Turns monitors on/off, sets primary, positions, resolution and refresh rate
-- **Moves your windows along**: windows on a monitor that gets turned off land on the new primary
-  monitor; windows on monitors that stay on keep their monitor. Maximized and borderless-fullscreen
-  windows stay maximized/fullscreen.
-- Tray icon, basic settings window, autostart option
+- **Moves your windows along**: windows on monitors that stay on keep their monitor. If a monitor is
+  turned off, its windows go to the new primary (if it was the primary) or to a side monitor that
+  stays on (if it was a side monitor). Maximized and borderless-fullscreen windows stay that way.
+- **Remembers the last mode** after reboot, or always starts in a default mode of your choice
+- **Xbox controller**: asks "switch to Bed?" when a controller connects — answer with the
+  D-pad/stick + A/B. Press **View + Menu** anytime to open the mode menu.
+- Tray icon (current mode is checked), settings window, autostart option
 - Plain JSON config + CLI, so an **AI assistant can set it up for you** (see [AGENTS.md](AGENTS.md))
 - No install, no dependencies — just PowerShell 5.1, which ships with Windows 10/11
 

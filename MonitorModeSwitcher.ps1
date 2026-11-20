@@ -102,11 +102,15 @@ public static class MMS {
     EnumDisplayMonitors(IntPtr.Zero,IntPtr.Zero,(IntPtr m,IntPtr dc,ref RECT r,IntPtr l)=>{ var i=Info(m); d[i.szDevice]=i; return true; },IntPtr.Zero);
     return d; }
 
-  static void Restore(List<Win> wins){
-    var mons=Monitors(); var idToDev=new Dictionary<string,string>(); string prim=null;
-    foreach(var d in List()) if(d.Active){ idToDev[d.Id]=d.Dev; if(d.Primary) prim=d.Dev; }
+  // Windows on a monitor that is still on stay there. Windows on a monitor that was turned off go to:
+  //   old primary -> new primary;  old side monitor -> a side monitor that is still on (else new primary).
+  static void Restore(List<Win> wins,string oldPrimId,HashSet<string> wasActive){
+    var mons=Monitors(); var idToDev=new Dictionary<string,string>(); string prim=null, side=null, sideKept=null;
+    foreach(var d in List()) if(d.Active){ idToDev[d.Id]=d.Dev;
+      if(d.Primary) prim=d.Dev; else { if(side==null) side=d.Dev; if(sideKept==null&&wasActive.Contains(d.Id)) sideKept=d.Dev; } }
+    string sideTarget=sideKept??side??prim;
     foreach(var w in wins){
-      string dev; if(w.Id==null||!idToDev.TryGetValue(w.Id,out dev)) dev=prim;
+      string dev; if(w.Id==null||!idToDev.TryGetValue(w.Id,out dev)) dev=(w.Id==null||w.Id==oldPrimId)?prim:sideTarget;
       MONITORINFOEX mi; if(dev==null||!mons.TryGetValue(dev,out mi)) continue;
       RECT m=mi.rcMonitor, wa=mi.rcWork; int W=wa.R-wa.L, Hh=wa.B-wa.T;
       if(w.Full){ SetWindowPos(w.H,IntPtr.Zero,m.L,m.T,m.R-m.L,m.B-m.T,0x14); }
@@ -118,7 +122,8 @@ public static class MMS {
   // Apply a layout. Monitors not listed are turned off.
   public static string Apply(string[] ids,bool[] prim,int[] x,int[] y,int[] w,int[] h,int[] hz,bool move,int delay){
     var before=List(); var devToId=new Dictionary<string,string>();
-    foreach(var d in before) if(d.Active) devToId[d.Dev]=d.Id;
+    string oldPrim=null; var wasActive=new HashSet<string>();
+    foreach(var d in before) if(d.Active){ devToId[d.Dev]=d.Id; wasActive.Add(d.Id); if(d.Primary) oldPrim=d.Id; }
     var wins=move?Snapshot(devToId):null;
     var used=new HashSet<string>(); int r=0;
     for(int i=0;i<ids.Length;i++){
@@ -128,8 +133,18 @@ public static class MMS {
     foreach(var d in before) if(d.Active&&!used.Contains(d.Dev)) r|=Set(d.Dev,0,0,0,0,0,false);
     int c=ChangeDisplaySettingsEx(null,IntPtr.Zero,IntPtr.Zero,0,IntPtr.Zero);
     if(r!=0||c!=0) return "Windows rejected the layout (code "+r+"/"+c+")";
-    if(move&&wins.Count>0){ Thread.Sleep(delay); Restore(wins); Thread.Sleep(1500); Restore(wins); }
+    if(move&&wins.Count>0){ Thread.Sleep(delay); Restore(wins,oldPrim,wasActive); Thread.Sleep(1500); Restore(wins,oldPrim,wasActive); }
     return null; }
+
+  // ---- Xbox / XInput controller ----
+  [StructLayout(LayoutKind.Sequential)] struct XSTATE{ public uint Packet; public ushort Buttons; public byte LT,RT; public short LX,LY,RX,RY; }
+  [DllImport("xinput1_4.dll")] static extern int XInputGetState(int i,out XSTATE s);
+  // -1 = no controller. Otherwise button bits; left stick is folded into the D-pad bits
+  // (Up 0x1, Down 0x2, Left 0x4, Right 0x8, Start 0x10, Back/View 0x20, A 0x1000, B 0x2000).
+  public static int Pad(){
+    try{ for(int i=0;i<4;i++){ XSTATE s; if(XInputGetState(i,out s)!=0) continue;
+      int b=s.Buttons; if(s.LY>16000)b|=1; if(s.LY<-16000)b|=2; if(s.LX<-16000)b|=4; if(s.LX>16000)b|=8; return b; } }catch{}
+    return -1; }
 }
 '@
 
@@ -138,7 +153,16 @@ function Get-Config {
   $c = $null
   if (Test-Path $CfgPath) { $c = Get-Content $CfgPath -Raw -Encoding UTF8 | ConvertFrom-Json }
   if (-not $c) { $c = [pscustomobject]@{} }
-  foreach ($k in @{ moveWindows = $true; settleDelayMs = 3000; modes = @() }.GetEnumerator()) {
+  $defaults = @{
+    moveWindows = $true; settleDelayMs = 3000; modes = @()
+    startupAction = 'last'      # none | last | mode
+    startupMode = ''            # used when startupAction = mode
+    lastMode = ''               # written automatically on every switch
+    controllerPrompt = $false   # ask to switch when an Xbox controller connects
+    controllerMode = ''         # mode preselected in that prompt
+    controllerMenuCombo = $true # View+Menu on the controller opens the mode menu
+  }
+  foreach ($k in $defaults.GetEnumerator()) {
     if (-not ($c.PSObject.Properties.Name -contains $k.Key)) { $c | Add-Member $k.Key $k.Value }
   }
   $c.modes = @($c.modes | Where-Object { $_ })
@@ -192,7 +216,9 @@ function Invoke-Mode([string]$name) {
     [int[]]($d | ForEach-Object width), [int[]]($d | ForEach-Object height),
     [int[]]($d | ForEach-Object { if ($_.refresh) { $_.refresh } else { 0 } }),
     [bool]$c.moveWindows, [int]$c.settleDelayMs)
-  if ($err) { $err } else { "Switched to '$name'." }
+  if ($err) { return $err }
+  $c = Get-Config; $c.lastMode = $name; Save-Config $c
+  "Switched to '$name'."
 }
 
 # ---------------- autostart ----------------
@@ -257,7 +283,9 @@ function Show-Settings {
   & $btn 'Rename...' 132 {
     if (-not $lb.SelectedItem) { return }
     $n = [Microsoft.VisualBasic.Interaction]::InputBox('New name:', $AppName, $lb.SelectedItem)
-    if ($n) { $c = Get-Config; ($c.modes | Where-Object { $_.name -eq $lb.SelectedItem }).name = $n; Save-Config $c; & $refresh; $lb.SelectedItem = $n }
+    if ($n) { $c = Get-Config; $old = $lb.SelectedItem; ($c.modes | Where-Object { $_.name -eq $old }).name = $n
+      foreach ($k in 'lastMode', 'startupMode', 'controllerMode') { if ($c.$k -eq $old) { $c.$k = $n } }
+      Save-Config $c; & $refresh; $lb.SelectedItem = $n }
   }
   & $btn 'Delete' 166 { if ($lb.SelectedItem) { Remove-Mode $lb.SelectedItem; & $refresh } }
 
@@ -270,11 +298,33 @@ function Show-Settings {
   $nd = New-Object System.Windows.Forms.NumericUpDown; $nd.SetBounds(312, 320, 80, 22); $nd.Minimum = 500; $nd.Maximum = 15000; $nd.Increment = 500
   $nd.Value = [Math]::Min(15000, [Math]::Max(500, [int]$c.settleDelayMs)); $f.Controls.Add($nd)
 
-  $open = New-Object System.Windows.Forms.LinkLabel; $open.Text = 'Open config.json'; $open.SetBounds(12, 384, 200, 20)
+  $modeNames = @($c.modes | ForEach-Object name)
+  $newCombo = { param($x, $y, $w, $sel) $cb = New-Object System.Windows.Forms.ComboBox; $cb.DropDownStyle = 'DropDownList'; $cb.SetBounds($x, $y, $w, 24)
+    foreach ($n in $modeNames) { [void]$cb.Items.Add($n) }; if ($sel -and $cb.Items.Contains($sel)) { $cb.SelectedItem = $sel } elseif ($cb.Items.Count) { $cb.SelectedIndex = 0 }
+    $f.Controls.Add($cb); $cb }
+
+  $l3 = New-Object System.Windows.Forms.Label; $l3.Text = 'On start (after boot):'; $l3.SetBounds(12, 356, 140, 20); $f.Controls.Add($l3)
+  $cbStart = New-Object System.Windows.Forms.ComboBox; $cbStart.DropDownStyle = 'DropDownList'; $cbStart.SetBounds(152, 352, 150, 24)
+  [void]$cbStart.Items.AddRange(@('Do nothing', 'Restore last mode', 'Always use:')); $f.Controls.Add($cbStart)
+  $cbStart.SelectedIndex = switch ($c.startupAction) { 'none' { 0 } 'mode' { 2 } default { 1 } }
+  $cbStartMode = & $newCombo 308 352 140 $c.startupMode
+  $cbStartMode.Enabled = ($cbStart.SelectedIndex -eq 2); $cbStart.Add_SelectedIndexChanged({ $cbStartMode.Enabled = ($cbStart.SelectedIndex -eq 2) })
+
+  $cbPad = New-Object System.Windows.Forms.CheckBox; $cbPad.Text = 'When an Xbox controller connects, ask to switch to:'
+  $cbPad.SetBounds(12, 388, 300, 22); $cbPad.Checked = [bool]$c.controllerPrompt; $f.Controls.Add($cbPad)
+  $cbPadMode = & $newCombo 308 386 140 $c.controllerMode
+  $cbCombo = New-Object System.Windows.Forms.CheckBox; $cbCombo.Text = 'Controller: View + Menu buttons open the mode menu'
+  $cbCombo.SetBounds(12, 414, 436, 22); $cbCombo.Checked = [bool]$c.controllerMenuCombo; $f.Controls.Add($cbCombo)
+
+  $open = New-Object System.Windows.Forms.LinkLabel; $open.Text = 'Open config.json'; $open.SetBounds(12, 464, 200, 20)
   $open.Add_Click({ if (-not (Test-Path $CfgPath)) { Save-Config (Get-Config) }; Start-Process notepad.exe $CfgPath }); $f.Controls.Add($open)
-  $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Save && Close'; $ok.SetBounds(332, 378, 116, 30); $f.Controls.Add($ok)
+  $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Save && Close'; $ok.SetBounds(332, 458, 116, 30); $f.Controls.Add($ok)
+  $f.ClientSize = New-Object System.Drawing.Size(460, 500)
   $ok.Add_Click({
-    $c = Get-Config; $c.moveWindows = $cbMove.Checked; $c.settleDelayMs = [int]$nd.Value; Save-Config $c
+    $c = Get-Config; $c.moveWindows = $cbMove.Checked; $c.settleDelayMs = [int]$nd.Value
+    $c.startupAction = @('none', 'last', 'mode')[$cbStart.SelectedIndex]; $c.startupMode = [string]$cbStartMode.SelectedItem
+    $c.controllerPrompt = $cbPad.Checked; $c.controllerMode = [string]$cbPadMode.SelectedItem; $c.controllerMenuCombo = $cbCombo.Checked
+    Save-Config $c
     Set-Autostart $cbAuto.Checked; $f.Close()
   })
   $f.AcceptButton = $ok
@@ -291,15 +341,57 @@ $created = $false
 $mutex = New-Object System.Threading.Mutex($true, 'Local\MonitorModeSwitcherTray', [ref]$created)
 if (-not $created) { [System.Windows.Forms.MessageBox]::Show("$AppName is already running in the tray.", $AppName) | Out-Null; return }
 
+# ---- controller-friendly mode picker (mouse, keyboard or Xbox controller) ----
+function Show-ModePicker([string]$title, [string]$preselect) {
+  $modes = @((Get-Config).modes | ForEach-Object name)
+  if (-not $modes) { return $null }
+  $f = New-Object System.Windows.Forms.Form
+  $f.FormBorderStyle = 'None'; $f.TopMost = $true; $f.StartPosition = 'CenterScreen'; $f.ShowInTaskbar = $false
+  $f.BackColor = [System.Drawing.Color]::FromArgb(24, 24, 28); $f.KeyPreview = $true
+  $rowH = 64; $f.ClientSize = New-Object System.Drawing.Size(520, (110 + ($modes.Count + 1) * ($rowH + 8)))
+  $t = New-Object System.Windows.Forms.Label; $t.Text = $title; $t.ForeColor = [System.Drawing.Color]::White
+  $t.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold); $t.SetBounds(24, 18, 472, 40); $f.Controls.Add($t)
+  $h = New-Object System.Windows.Forms.Label; $h.Text = 'Controller: up/down + A to confirm, B to cancel'
+  $h.ForeColor = [System.Drawing.Color]::Gray; $h.Font = New-Object System.Drawing.Font('Segoe UI', 10); $h.SetBounds(24, 58, 472, 24); $f.Controls.Add($h)
+  $items = @($modes) + 'Cancel'
+  $btns = @()
+  for ($i = 0; $i -lt $items.Count; $i++) {
+    $b = New-Object System.Windows.Forms.Label; $b.Text = $items[$i]; $b.TextAlign = 'MiddleCenter'
+    $b.Font = New-Object System.Drawing.Font('Segoe UI', 15); $b.ForeColor = [System.Drawing.Color]::White
+    $b.SetBounds(24, (92 + $i * ($rowH + 8)), 472, $rowH); $b.Tag = $i; $b.Cursor = 'Hand'
+    $b.Add_Click({ param($s) $script:pick = $s.Tag; $f.Close() })
+    $f.Controls.Add($b); $btns += $b
+  }
+  $script:sel = [Math]::Max(0, [array]::IndexOf($modes, $preselect)); $script:pick = -1
+  $paint = { for ($i = 0; $i -lt $btns.Count; $i++) {
+      $btns[$i].BackColor = if ($i -eq $script:sel) { [System.Drawing.Color]::FromArgb(45, 120, 220) } else { [System.Drawing.Color]::FromArgb(48, 48, 56) } } }
+  & $paint
+  $move = { param($d) $script:sel = ($script:sel + $d + $btns.Count) % $btns.Count; & $paint }
+  $f.Add_KeyDown({ param($s, $e)
+    switch ($e.KeyCode) { 'Up' { & $move -1 } 'Down' { & $move 1 } 'Enter' { $script:pick = $script:sel; $f.Close() } 'Escape' { $f.Close() } } })
+  $script:prevPad = [MMS]::Pad()
+  $tm = New-Object System.Windows.Forms.Timer; $tm.Interval = 50
+  $tm.Add_Tick({
+    $p = [MMS]::Pad(); if ($p -lt 0) { return }
+    $new = $p -band (-bnot [Math]::Max(0, $script:prevPad)); $script:prevPad = $p
+    if ($new -band 0x1) { & $move -1 }; if ($new -band 0x2) { & $move 1 }
+    if ($new -band 0x1000) { $script:pick = $script:sel; $f.Close() }
+    if ($new -band 0x2000) { $f.Close() }
+  })
+  $f.Add_Shown({ $f.Activate(); $tm.Start() }); $f.Add_FormClosed({ $tm.Stop() })
+  [void]$f.ShowDialog()
+  if ($script:pick -ge 0 -and $script:pick -lt $modes.Count) { $modes[$script:pick] } else { $null }
+}
+
 $ni = New-Object System.Windows.Forms.NotifyIcon
 $ni.Icon = $script:icon; $ni.Text = $AppName; $ni.Visible = $true
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $menu.Add_Opening({
   $menu.Items.Clear()
-  $modes = (Get-Config).modes
+  $cfgM = Get-Config; $modes = $cfgM.modes
   if (-not $modes) { $i = $menu.Items.Add('(no modes yet - open Settings)'); $i.Enabled = $false }
   foreach ($m in $modes) {
-    $it = $menu.Items.Add($m.name); $it.Tag = $m.name
+    $it = $menu.Items.Add($m.name); $it.Tag = $m.name; $it.Checked = ($m.name -eq $cfgM.lastMode)
     $it.Add_Click({ param($s) $r = Invoke-Mode $s.Tag; $ni.ShowBalloonTip(2500, $AppName, $r, 'Info') })
   }
   [void]$menu.Items.Add('-')
@@ -312,7 +404,41 @@ $ni.ContextMenuStrip = $menu
 $ni.Add_MouseClick({ param($s, $e)
   if ($e.Button -eq 'Left') { $mi = [System.Windows.Forms.NotifyIcon].GetMethod('ShowContextMenu', [Reflection.BindingFlags]'Instance,NonPublic'); $mi.Invoke($ni, $null) }
 })
-if (-not (Get-Config).modes) { $ni.ShowBalloonTip(4000, $AppName, 'No modes yet. Right-click the tray icon > Settings to save your first layout.', 'Info') }
+function Switch-WithTip([string]$m) { $ni.ShowBalloonTip(2500, $AppName, (Invoke-Mode $m), 'Info') }
+
+$cfg0 = Get-Config
+if (-not $cfg0.modes) { $ni.ShowBalloonTip(4000, $AppName, 'No modes yet. Right-click the tray icon > Settings to save your first layout.', 'Info') }
+
+# Startup: restore last mode or a fixed default mode
+$startMode = switch ($cfg0.startupAction) { 'last' { $cfg0.lastMode } 'mode' { $cfg0.startupMode } default { '' } }
+if ($startMode -and ($cfg0.modes | Where-Object { $_.name -eq $startMode })) {
+  $st = New-Object System.Windows.Forms.Timer; $st.Interval = 2000
+  $st.Add_Tick({ $st.Stop(); Switch-WithTip $startMode }); $st.Start()
+}
+
+# Controller watcher: prompt on connect, View+Menu opens the picker
+$script:padWas = ([MMS]::Pad() -ge 0); $script:padPrev = 0; $script:busy = $false
+$pt = New-Object System.Windows.Forms.Timer; $pt.Interval = 150
+$pt.Add_Tick({
+  if ($script:busy) { return }
+  $p = [MMS]::Pad(); $c = Get-Config; $choice = $null; $ask = $false; $title = ''
+  if ($p -ge 0 -and -not $script:padWas -and $c.controllerPrompt -and $c.controllerMode -and $c.lastMode -ne $c.controllerMode) {
+    $ask = $true; $title = 'Controller connected - switch mode?'
+  }
+  if ($p -ge 0 -and $c.controllerMenuCombo -and (($p -band 0x30) -eq 0x30) -and (($script:padPrev -band 0x30) -ne 0x30)) {
+    $ask = $true; $title = 'Switch monitor mode'
+  }
+  $script:padWas = ($p -ge 0); $script:padPrev = [Math]::Max(0, $p)
+  if ($ask) {
+    $script:busy = $true
+    $pre = if ($c.controllerMode) { $c.controllerMode } else { $c.lastMode }
+    $choice = Show-ModePicker $title $pre
+    $script:padPrev = [Math]::Max(0, [MMS]::Pad())
+    if ($choice) { Switch-WithTip $choice }
+    $script:busy = $false
+  }
+})
+$pt.Start()
 
 [System.Windows.Forms.Application]::Run()
 $ni.Dispose(); $mutex.ReleaseMutex()
