@@ -151,7 +151,11 @@ public static class MMS {
 # ---------------- config ----------------
 function Get-Config {
   $c = $null
-  if (Test-Path $CfgPath) { $c = Get-Content $CfgPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+  $stamp = if (Test-Path $CfgPath) { (Get-Item $CfgPath).LastWriteTimeUtc.Ticks } else { 0 }
+  if ($script:cfgCache -and $script:cfgStamp -eq $stamp) {
+    return $script:cfgCache   # file unchanged since last read
+  }
+  if ($stamp) { $c = Get-Content $CfgPath -Raw -Encoding UTF8 | ConvertFrom-Json }
   if (-not $c) { $c = [pscustomobject]@{} }
   $defaults = @{
     moveWindows = $true; settleDelayMs = 3000; modes = @()
@@ -166,6 +170,7 @@ function Get-Config {
     if (-not ($c.PSObject.Properties.Name -contains $k.Key)) { $c | Add-Member $k.Key $k.Value }
   }
   $c.modes = @($c.modes | Where-Object { $_ })
+  $script:cfgCache = $c; $script:cfgStamp = $stamp
   $c
 }
 function Save-Config($c) { $c | ConvertTo-Json -Depth 6 | Set-Content $CfgPath -Encoding UTF8 }
@@ -418,7 +423,7 @@ if ($startMode -and ($cfg0.modes | Where-Object { $_.name -eq $startMode })) {
 
 # Controller watcher: prompt on connect, View+Menu opens the picker
 $script:padWas = ([MMS]::Pad() -ge 0); $script:padPrev = 0; $script:busy = $false
-$pt = New-Object System.Windows.Forms.Timer; $pt.Interval = 150
+$pt = New-Object System.Windows.Forms.Timer; $pt.Interval = 200
 $pt.Add_Tick({
   if ($script:busy) { return }
   $p = [MMS]::Pad(); $c = Get-Config; $choice = $null; $ask = $false; $title = ''
