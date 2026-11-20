@@ -1,0 +1,12 @@
+{
+  "moveWindows": true,
+  "settleDelayMs": 3000,
+  "modes": [
+    { "name": "Desk", "displays": [
+      { "id": "ACR0915", "name": "1440p main", "primary": true,  "x": 0,    "y": 0,   "width": 2560, "height": 1440, "refresh": 0 },
+      { "id": "LEN111C", "name": "Side",       "primary": false, "x": 2560, "y": 360, "width": 1920, "height": 1080, "refresh": 0 } ] },
+    { "name": "Bed", "displays": [
+      { "id": "AUS2703", "name": "1080p main", "primary": true,  "x": 0,     "y": 0, "width": 1920, "height": 1080, "refresh": 0 },
+      { "id": "LEN111C", "name": "Side",       "primary": false, "x": -1920, "y": 0, "width": 1920, "height": 1080, "refresh": 0 } ] }
+  ]
+}
