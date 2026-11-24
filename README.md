@@ -9,9 +9,9 @@ A tiny Windows tray tool that switches between saved multi-monitor layouts with 
   stays on (if it was a side monitor). Maximized and borderless-fullscreen windows stay that way.
 - **Switches the audio output** per mode (e.g. Bed → the TV's/monitor's HDMI audio)
 - **Remembers the last mode** after reboot, or always starts in a default mode of your choice
-- **Xbox controller**: asks "switch to Bed?" when a controller connects — answer with the
-  D-pad/stick + A/B. Tap **View + Menu** anytime to open the mode menu, or **hold them for 1 s**
-  to switch straight to a mode you choose (e.g. Desk).
+- **Xbox controller**: hold **View** and **double-tap A** or **double-tap B** to switch straight to a
+  mode you choose (e.g. A = Desk, B = Bed). Optionally asks "switch to Bed?" when a controller connects.
+- **Keyboard shortcut** `Ctrl+#` (configurable) toggles between two modes
 - Tray icon (current mode is checked), settings window, autostart option
 - Plain JSON config + CLI, so an **AI assistant can set it up for you** (see [AGENTS.md](AGENTS.md))
 - No install, no dependencies — just PowerShell 5.1, which ships with Windows 10/11
