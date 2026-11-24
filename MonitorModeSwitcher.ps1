@@ -164,7 +164,8 @@ function Get-Config {
     lastMode = ''               # written automatically on every switch
     controllerPrompt = $false   # ask to switch when an Xbox controller connects
     controllerMode = ''         # mode preselected in that prompt
-    controllerMenuCombo = $true # View+Menu on the controller opens the mode menu
+    controllerMenuCombo = $true # short press View+Menu on the controller opens the mode menu
+    controllerHoldMode = ''     # hold View+Menu for 1 s to switch straight to this mode ('' = off)
   }
   foreach ($k in $defaults.GetEnumerator()) {
     if (-not ($c.PSObject.Properties.Name -contains $k.Key)) { $c | Add-Member $k.Key $k.Value }
@@ -318,17 +319,21 @@ function Show-Settings {
   $cbPad = New-Object System.Windows.Forms.CheckBox; $cbPad.Text = 'When an Xbox controller connects, ask to switch to:'
   $cbPad.SetBounds(12, 388, 300, 22); $cbPad.Checked = [bool]$c.controllerPrompt; $f.Controls.Add($cbPad)
   $cbPadMode = & $newCombo 308 386 140 $c.controllerMode
-  $cbCombo = New-Object System.Windows.Forms.CheckBox; $cbCombo.Text = 'Controller: View + Menu buttons open the mode menu'
+  $cbCombo = New-Object System.Windows.Forms.CheckBox; $cbCombo.Text = 'Controller: tap View + Menu to open the mode menu'
   $cbCombo.SetBounds(12, 414, 436, 22); $cbCombo.Checked = [bool]$c.controllerMenuCombo; $f.Controls.Add($cbCombo)
+  $cbHold = New-Object System.Windows.Forms.CheckBox; $cbHold.Text = 'Hold View + Menu (1 s) to switch to:'
+  $cbHold.SetBounds(12, 440, 290, 22); $cbHold.Checked = [bool]$c.controllerHoldMode; $f.Controls.Add($cbHold)
+  $cbHoldMode = & $newCombo 308 438 140 $c.controllerHoldMode
 
-  $open = New-Object System.Windows.Forms.LinkLabel; $open.Text = 'Open config.json'; $open.SetBounds(12, 464, 200, 20)
+  $open = New-Object System.Windows.Forms.LinkLabel; $open.Text = 'Open config.json'; $open.SetBounds(12, 490, 200, 20)
   $open.Add_Click({ if (-not (Test-Path $CfgPath)) { Save-Config (Get-Config) }; Start-Process notepad.exe $CfgPath }); $f.Controls.Add($open)
-  $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Save && Close'; $ok.SetBounds(332, 458, 116, 30); $f.Controls.Add($ok)
-  $f.ClientSize = New-Object System.Drawing.Size(460, 500)
+  $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Save && Close'; $ok.SetBounds(332, 484, 116, 30); $f.Controls.Add($ok)
+  $f.ClientSize = New-Object System.Drawing.Size(460, 526)
   $ok.Add_Click({
     $c = Get-Config; $c.moveWindows = $cbMove.Checked; $c.settleDelayMs = [int]$nd.Value
     $c.startupAction = @('none', 'last', 'mode')[$cbStart.SelectedIndex]; $c.startupMode = [string]$cbStartMode.SelectedItem
     $c.controllerPrompt = $cbPad.Checked; $c.controllerMode = [string]$cbPadMode.SelectedItem; $c.controllerMenuCombo = $cbCombo.Checked
+    $c.controllerHoldMode = if ($cbHold.Checked) { [string]$cbHoldMode.SelectedItem } else { '' }
     Save-Config $c
     Set-Autostart $cbAuto.Checked; $f.Close()
   })
@@ -430,8 +435,15 @@ $pt.Add_Tick({
   if ($p -ge 0 -and -not $script:padWas -and $c.controllerPrompt -and $c.controllerMode -and $c.lastMode -ne $c.controllerMode) {
     $ask = $true; $title = 'Controller connected - switch mode?'
   }
-  if ($p -ge 0 -and $c.controllerMenuCombo -and (($p -band 0x30) -eq 0x30) -and (($script:padPrev -band 0x30) -ne 0x30)) {
-    $ask = $true; $title = 'Switch monitor mode'
+  # View + Menu: hold 1 s = switch straight to controllerHoldMode, short press = open the menu
+  $combo = ($p -ge 0) -and (($p -band 0x30) -eq 0x30)
+  if ($combo -and -not $script:holdStart) { $script:holdStart = [DateTime]::Now; $script:holdDone = $false }
+  if ($combo -and -not $script:holdDone -and $c.controllerHoldMode -and ([DateTime]::Now - $script:holdStart).TotalMilliseconds -ge 1000) {
+    $script:holdDone = $true; $script:busy = $true; Switch-WithTip $c.controllerHoldMode; $script:busy = $false
+  }
+  if (-not $combo -and $script:holdStart) {
+    if (-not $script:holdDone -and $c.controllerMenuCombo) { $ask = $true; $title = 'Switch monitor mode' }
+    $script:holdStart = $null
   }
   $script:padWas = ($p -ge 0); $script:padPrev = [Math]::Max(0, $p)
   if ($ask) {

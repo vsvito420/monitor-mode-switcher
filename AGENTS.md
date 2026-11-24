@@ -53,7 +53,8 @@ Alternative: if the user has already arranged a layout in Windows, save it with
 - `startupAction`: `"last"` (restore `lastMode`, default), `"mode"` (always `startupMode`), `"none"`.
 - `controllerPrompt` (bool) + `controllerMode` (mode name): when an Xbox/XInput controller connects
   and the current mode isn't `controllerMode`, show a controller-navigable prompt.
-- `controllerMenuCombo` (bool): View + Menu on the controller opens the mode menu.
+- `controllerMenuCombo` (bool): tapping View + Menu on the controller opens the mode menu.
+- `controllerHoldMode` (mode name or `""`): holding View + Menu for 1 s switches straight to this mode.
 - `lastMode` is written by the app on every switch; don't edit it.
 
 ## 4. Verify
