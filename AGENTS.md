@@ -58,6 +58,8 @@ Alternative: if the user has already arranged a layout in Windows, save it with
   and the current mode isn't `controllerMode`, show a controller-navigable prompt.
 - `controllerMenuCombo` (bool): tapping View + Menu on the controller opens the mode menu.
 - `controllerHoldMode` (mode name or `""`): holding View + Menu for 1 s switches straight to this mode.
+- `toggleModes` (array of two mode names): what `-Toggle` / `Toggle.vbs` switches between.
+  Empty = the first two modes.
 - `lastMode` is written by the app on every switch; don't edit it.
 
 ## 4. Verify

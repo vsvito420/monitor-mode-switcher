@@ -13,7 +13,7 @@
 #>
 param(
   [string]$Mode, [string]$Capture, [string]$Delete,
-  [switch]$List, [switch]$Modes, [switch]$Settings, [switch]$Audio
+  [switch]$List, [switch]$Modes, [switch]$Settings, [switch]$Audio, [switch]$Toggle
 )
 
 $ErrorActionPreference = 'Stop'
@@ -211,6 +211,7 @@ function Get-Config {
     controllerMode = ''         # mode preselected in that prompt
     controllerMenuCombo = $true # short press View+Menu on the controller opens the mode menu
     controllerHoldMode = ''     # hold View+Menu for 1 s to switch straight to this mode ('' = off)
+    toggleModes = @()           # -Toggle switches between these two modes (default: the first two modes)
   }
   foreach ($k in $defaults.GetEnumerator()) {
     if (-not ($c.PSObject.Properties.Name -contains $k.Key)) { $c | Add-Member $k.Key $k.Value }
@@ -298,19 +299,49 @@ if ($Modes)   { (Get-Config).modes | ConvertTo-Json -Depth 6; return }
 if ($Capture) { Save-CurrentLayout $Capture; return }
 if ($Delete)  { Remove-Mode $Delete; "Deleted '$Delete'."; return }
 if ($Mode)    { Invoke-Mode $Mode; return }
+if ($Toggle) {
+  $c = Get-Config; $t = @($c.toggleModes | Where-Object { $_ })
+  if ($t.Count -lt 2) { $t = @($c.modes | Select-Object -First 2 | ForEach-Object name) }
+  if ($t.Count -lt 2) { 'Need at least two modes to toggle.'; return }
+  $target = if ($c.lastMode -eq $t[0]) { $t[1] } else { $t[0] }
+  Invoke-Mode $target; return
+}
 
 # ---------------- UI ----------------
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# Icon: two monitors with a swap arrow. Drawn at any size; icon.ico is generated next to the script.
+function New-IconBitmap([int]$n) {
+  $bmp = New-Object System.Drawing.Bitmap $n, $n
+  $g = [System.Drawing.Graphics]::FromImage($bmp); $g.SmoothingMode = 'AntiAlias'; $k = $n / 32.0
+  $r = { param($x, $y, $w, $h) New-Object System.Drawing.RectangleF ($x * $k), ($y * $k), ($w * $k), ($h * $k) }
+  $dark = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(40, 44, 52))
+  $a = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(64, 140, 255))
+  $b = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(150, 95, 230))
+  $g.FillRectangle($dark, (& $r 0 3 20 14)); $g.FillRectangle($a, (& $r 1.5 4.5 17 11)); $g.FillRectangle($dark, (& $r 8 17 4 3))
+  $g.FillRectangle($dark, (& $r 12 12 20 14)); $g.FillRectangle($b, (& $r 13.5 13.5 17 11)); $g.FillRectangle($dark, (& $r 20 26 4 3))
+  $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::White), ([Math]::Max(1.5, 2.2 * $k))
+  $pen.EndCap = 'ArrowAnchor'; $pen.StartCap = 'Round'
+  $g.DrawArc($pen, (& $r 5 6 14 14), 200, 120)
+  $g.Dispose(); $bmp
+}
+function Save-IconFile([string]$path) {
+  $sizes = 16, 24, 32, 48, 64, 256; $pngs = foreach ($n in $sizes) { $ms = New-Object IO.MemoryStream; (New-IconBitmap $n).Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); , $ms.ToArray() }
+  $out = New-Object IO.MemoryStream; $w = New-Object IO.BinaryWriter $out
+  $w.Write([uint16]0); $w.Write([uint16]1); $w.Write([uint16]$sizes.Count)
+  $off = 6 + 16 * $sizes.Count
+  for ($i = 0; $i -lt $sizes.Count; $i++) {
+    $sz = if ($sizes[$i] -ge 256) { 0 } else { $sizes[$i] }
+    $w.Write([byte]$sz); $w.Write([byte]$sz); $w.Write([byte]0); $w.Write([byte]0); $w.Write([uint16]1); $w.Write([uint16]32)
+    $w.Write([uint32]$pngs[$i].Length); $w.Write([uint32]$off); $off += $pngs[$i].Length
+  }
+  foreach ($p in $pngs) { $w.Write($p) }
+  [IO.File]::WriteAllBytes($path, $out.ToArray())
+}
 function New-TrayIcon {
-  $bmp = New-Object System.Drawing.Bitmap 32, 32
-  $g = [System.Drawing.Graphics]::FromImage($bmp); $g.SmoothingMode = 'AntiAlias'
-  $blue = [System.Drawing.Color]::FromArgb(70, 150, 255); $white = [System.Drawing.Brushes]::White
-  $g.FillRectangle((New-Object System.Drawing.SolidBrush $blue), 1, 5, 19, 14)
-  $g.FillRectangle((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(150, 200, 255))), 12, 11, 19, 14)
-  $g.FillRectangle($white, 19, 25, 5, 3); $g.FillRectangle($white, 15, 28, 13, 3)
-  $g.Dispose()
-  [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+  $ico = Join-Path $PSScriptRoot 'icon.ico'
+  try { if (-not (Test-Path $ico)) { Save-IconFile $ico } } catch {}   # .ico for shortcuts; tray uses the bitmap directly
+  [System.Drawing.Icon]::FromHandle((New-IconBitmap 32).GetHicon())
 }
 
 function Show-Settings {

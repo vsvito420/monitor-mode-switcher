@@ -52,6 +52,11 @@ The agent follows [AGENTS.md](AGENTS.md).
 .\MonitorModeSwitcher.ps1 -Settings
 ```
 
+**One-click toggle on the taskbar:** `Toggle.vbs` (or `MonitorModeSwitcher.ps1 -Toggle`) switches
+between two modes — `toggleModes` in config.json, default the first two modes. Create a shortcut
+to `wscript.exe "C:\path\Toggle.vbs"`, give it `icon.ico` (generated on first tray start), put it in the
+Start menu and choose "Pin to taskbar".
+
 Hotkey tip: create a shortcut to `wscript.exe "C:\path\MonitorModeSwitcher.vbs" "Desk"`, then set a
 shortcut key in its Properties.
 
