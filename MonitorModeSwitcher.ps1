@@ -13,7 +13,7 @@
 #>
 param(
   [string]$Mode, [string]$Capture, [string]$Delete,
-  [switch]$List, [switch]$Modes, [switch]$Settings
+  [switch]$List, [switch]$Modes, [switch]$Settings, [switch]$Audio
 )
 
 $ErrorActionPreference = 'Stop'
@@ -148,6 +148,51 @@ public static class MMS {
 }
 '@
 
+# Audio output switching (Core Audio; IPolicyConfig is undocumented but used by Windows itself)
+Add-Type -TypeDefinition @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices;
+public static class MMSAudio {
+  [StructLayout(LayoutKind.Sequential)] struct PROPERTYKEY{ public Guid fmtid; public int pid; }
+  [StructLayout(LayoutKind.Explicit)] struct PROPVARIANT{ [FieldOffset(0)] public short vt; [FieldOffset(8)] public IntPtr p; [FieldOffset(16)] public IntPtr pad; }
+  [ComImport,Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IMMDeviceEnumerator{ [PreserveSig] int EnumAudioEndpoints(int flow,int mask,out IMMDeviceCollection c);
+    [PreserveSig] int GetDefaultAudioEndpoint(int flow,int role,out IMMDevice d); }
+  [ComImport,Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IMMDeviceCollection{ [PreserveSig] int GetCount(out int n); [PreserveSig] int Item(int i,out IMMDevice d); }
+  [ComImport,Guid("D666063F-1587-4E43-81F1-B948E807363F"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IMMDevice{ [PreserveSig] int Activate(ref Guid iid,int ctx,IntPtr p,[MarshalAs(UnmanagedType.IUnknown)] out object o);
+    [PreserveSig] int OpenPropertyStore(int access,out IPropertyStore ps); [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id); }
+  [ComImport,Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPropertyStore{ [PreserveSig] int GetCount(out int n); [PreserveSig] int GetAt(int i,out PROPERTYKEY k); [PreserveSig] int GetValue(ref PROPERTYKEY k,out PROPVARIANT v); }
+  [ComImport,Guid("f8679f50-850a-41cf-9c72-430f290290c8"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPolicyConfig{ int a(); int b(); int c(); int d(); int e(); int f(); int g(); int h(); int i(); int j();
+    [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string id,int role); }
+  [ComImport,Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator{}
+  [ComImport,Guid("870af99c-171d-4f9e-af0d-e63df40c2bc9")] class PolicyConfigClient{}
+
+  public class Dev{ public string Id,Name; public bool Default; }
+  static string Name(IMMDevice d){
+    IPropertyStore ps; if(d.OpenPropertyStore(0,out ps)!=0) return null;
+    var k=new PROPERTYKEY{fmtid=new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"),pid=14}; PROPVARIANT v;
+    if(ps.GetValue(ref k,out v)!=0||v.vt!=31) return null; return Marshal.PtrToStringUni(v.p); }
+
+  // Active playback devices
+  public static List<Dev> List(){
+    var res=new List<Dev>(); var en=(IMMDeviceEnumerator)new MMDeviceEnumerator();
+    IMMDevice def; string defId=null; if(en.GetDefaultAudioEndpoint(0,1,out def)==0) def.GetId(out defId);
+    IMMDeviceCollection col; if(en.EnumAudioEndpoints(0,1,out col)!=0) return res;
+    int n; col.GetCount(out n);
+    for(int i=0;i<n;i++){ IMMDevice d; col.Item(i,out d); string id; d.GetId(out id); res.Add(new Dev{Id=id,Name=Name(d),Default=id==defId}); }
+    return res; }
+
+  // Set default output (all roles) to the first device whose name contains `match`. Returns the name or null.
+  public static string SetDefault(string match){
+    foreach(var d in List()) if(d.Name!=null&&d.Name.IndexOf(match,StringComparison.OrdinalIgnoreCase)>=0){
+      var pc=(IPolicyConfig)new PolicyConfigClient(); for(int r=0;r<3;r++) pc.SetDefaultEndpoint(d.Id,r); return d.Name; }
+    return null; }
+}
+'@
+
 # ---------------- config ----------------
 function Get-Config {
   $c = $null
@@ -200,7 +245,8 @@ function Save-CurrentLayout([string]$name) {
     [pscustomobject][ordered]@{ id = $_.id; name = $_.name; primary = $_.primary
       x = $_.x; y = $_.y; width = $_.width; height = $_.height; refresh = $_.refresh }
   })
-  $mode = [pscustomobject][ordered]@{ name = $name; displays = $disp }
+  $old = $c.modes | Where-Object { $_.name -eq $name } | Select-Object -First 1
+  $mode = [pscustomobject][ordered]@{ name = $name; audio = $(if ($old -and $old.audio) { $old.audio } else { '' }); displays = $disp }
   $c.modes = @($c.modes | Where-Object { $_.name -ne $name }) + $mode
   Save-Config $c
   "Saved mode '$name' with $($disp.Count) monitor(s)."
@@ -224,7 +270,14 @@ function Invoke-Mode([string]$name) {
     [bool]$c.moveWindows, [int]$c.settleDelayMs)
   if ($err) { return $err }
   $c = Get-Config; $c.lastMode = $name; Save-Config $c
-  "Switched to '$name'."
+  $msg = "Switched to '$name'."
+  if ($m.audio) {
+    # the HDMI audio device of a monitor that was just turned on can take a few seconds to show up
+    $set = $null
+    for ($i = 0; $i -lt 16 -and -not $set; $i++) { try { $set = [MMSAudio]::SetDefault($m.audio) } catch {}; if (-not $set) { Start-Sleep -Milliseconds 500 } }
+    $msg += if ($set) { " Audio: $set" } else { " Audio device '$($m.audio)' not found." }
+  }
+  $msg
 }
 
 # ---------------- autostart ----------------
@@ -240,6 +293,7 @@ function Set-Autostart([bool]$on) {
 
 # ---------------- CLI ----------------
 if ($List)    { Get-Monitors | ConvertTo-Json -Depth 4; return }
+if ($Audio)   { [MMSAudio]::List() | Select-Object Name, Default | ConvertTo-Json; return }
 if ($Modes)   { (Get-Config).modes | ConvertTo-Json -Depth 6; return }
 if ($Capture) { Save-CurrentLayout $Capture; return }
 if ($Delete)  { Remove-Mode $Delete; "Deleted '$Delete'."; return }
@@ -267,7 +321,20 @@ function Show-Settings {
 
   $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = 'Modes'; $lbl.SetBounds(12, 10, 200, 18); $f.Controls.Add($lbl)
   $lb = New-Object System.Windows.Forms.ListBox; $lb.SetBounds(12, 30, 280, 160); $f.Controls.Add($lb)
-  $info = New-Object System.Windows.Forms.Label; $info.SetBounds(12, 196, 436, 60); $info.ForeColor = [System.Drawing.Color]::DimGray; $f.Controls.Add($info)
+  $info = New-Object System.Windows.Forms.Label; $info.SetBounds(12, 196, 286, 64); $info.ForeColor = [System.Drawing.Color]::DimGray; $f.Controls.Add($info)
+
+  # per-mode audio output
+  $la = New-Object System.Windows.Forms.Label; $la.Text = 'Audio output for this mode:'; $la.SetBounds(302, 200, 146, 18); $f.Controls.Add($la)
+  $cbAudio = New-Object System.Windows.Forms.ComboBox; $cbAudio.DropDownStyle = 'DropDownList'; $cbAudio.SetBounds(302, 220, 146, 24)
+  $cbAudio.DropDownWidth = 380; $f.Controls.Add($cbAudio)
+  $script:audioLoading = $false
+  $cbAudio.Add_SelectedIndexChanged({
+    if ($script:audioLoading -or -not $lb.SelectedItem) { return }
+    $c = Get-Config; $mm = $c.modes | Where-Object { $_.name -eq $lb.SelectedItem } | Select-Object -First 1
+    $val = if ($cbAudio.SelectedIndex -le 0) { '' } else { [string]$cbAudio.SelectedItem -replace '^\d+ - ', '' }  # "1 - " prefix can change
+    if ($mm.PSObject.Properties.Name -contains 'audio') { $mm.audio = $val } else { $mm | Add-Member audio $val }
+    Save-Config $c
+  })
 
   $refresh = {
     $sel = $lb.SelectedItem; $lb.Items.Clear()
@@ -277,6 +344,13 @@ function Show-Settings {
   $lb.Add_SelectedIndexChanged({
     $m = (Get-Config).modes | Where-Object { $_.name -eq $lb.SelectedItem } | Select-Object -First 1
     $info.Text = if ($m) { ($m.displays | ForEach-Object { "$($_.name)  $($_.width)x$($_.height) @ $($_.x),$($_.y)$(if($_.primary){'  [primary]'})" }) -join "`n" } else { '' }
+    $script:audioLoading = $true; $cbAudio.Items.Clear(); [void]$cbAudio.Items.Add('(don''t change)')
+    $names = @(try { [MMSAudio]::List() | ForEach-Object Name } catch { })
+    if ($m -and $m.audio -and -not ($names | Where-Object { $_ -like "*$($m.audio)*" })) { $names += $m.audio }
+    foreach ($n in $names) { [void]$cbAudio.Items.Add($n) }
+    $cbAudio.SelectedIndex = 0
+    if ($m -and $m.audio) { for ($i = 1; $i -lt $cbAudio.Items.Count; $i++) { if ($cbAudio.Items[$i] -like "*$($m.audio)*") { $cbAudio.SelectedIndex = $i; break } } }
+    $script:audioLoading = $false
   })
 
   $btn = { param($t, $y, $a) $b = New-Object System.Windows.Forms.Button; $b.Text = $t; $b.SetBounds(302, $y, 146, 28); $b.Add_Click($a); $f.Controls.Add($b) }

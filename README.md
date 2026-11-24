@@ -7,6 +7,7 @@ A tiny Windows tray tool that switches between saved multi-monitor layouts with 
 - **Moves your windows along**: windows on monitors that stay on keep their monitor. If a monitor is
   turned off, its windows go to the new primary (if it was the primary) or to a side monitor that
   stays on (if it was a side monitor). Maximized and borderless-fullscreen windows stay that way.
+- **Switches the audio output** per mode (e.g. Bed → the TV's/monitor's HDMI audio)
 - **Remembers the last mode** after reboot, or always starts in a default mode of your choice
 - **Xbox controller**: asks "switch to Bed?" when a controller connects — answer with the
   D-pad/stick + A/B. Tap **View + Menu** anytime to open the mode menu, or **hold them for 1 s**

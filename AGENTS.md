@@ -40,6 +40,9 @@ Rules:
 - Monitors must touch edge to edge (no gaps, no overlaps).
 - `width`/`height` must be a resolution the monitor supports; use its native resolution unless told otherwise.
 - `refresh: 0` = highest refresh rate available at that resolution (recommended).
+- Optional `"audio"` on a mode: part of the output device name to make default when switching
+  (list them with `.\MonitorModeSwitcher.ps1 -Audio`; drop a leading `"1 - "` number, it can change).
+  Empty or missing = don't touch audio.
 - Keep existing modes unless the user asks to remove them. Write the file as UTF-8.
 
 Alternative: if the user has already arranged a layout in Windows, save it with
