@@ -209,9 +209,10 @@ function Get-Config {
     lastMode = ''               # written automatically on every switch
     controllerPrompt = $false   # ask to switch when an Xbox controller connects
     controllerMode = ''         # mode preselected in that prompt
-    controllerMenuCombo = $true # short press View+Menu on the controller opens the mode menu
-    controllerHoldMode = ''     # hold View+Menu for 1 s to switch straight to this mode ('' = off)
+    controllerViewA = ''        # hold View + double-tap A switches to this mode ('' = off)
+    controllerViewB = ''        # hold View + double-tap B switches to this mode ('' = off)
     toggleModes = @()           # -Toggle switches between these two modes (default: the first two modes)
+    toggleHotkey = 'Ctrl+#'     # global hotkey for the toggle while the tray runs ('' = off)
   }
   foreach ($k in $defaults.GetEnumerator()) {
     if (-not ($c.PSObject.Properties.Name -contains $k.Key)) { $c | Add-Member $k.Key $k.Value }
@@ -299,11 +300,15 @@ if ($Modes)   { (Get-Config).modes | ConvertTo-Json -Depth 6; return }
 if ($Capture) { Save-CurrentLayout $Capture; return }
 if ($Delete)  { Remove-Mode $Delete; "Deleted '$Delete'."; return }
 if ($Mode)    { Invoke-Mode $Mode; return }
-if ($Toggle) {
+function Get-ToggleTarget {
   $c = Get-Config; $t = @($c.toggleModes | Where-Object { $_ })
   if ($t.Count -lt 2) { $t = @($c.modes | Select-Object -First 2 | ForEach-Object name) }
-  if ($t.Count -lt 2) { 'Need at least two modes to toggle.'; return }
-  $target = if ($c.lastMode -eq $t[0]) { $t[1] } else { $t[0] }
+  if ($t.Count -lt 2) { return $null }
+  if ($c.lastMode -eq $t[0]) { $t[1] } else { $t[0] }
+}
+if ($Toggle) {
+  $target = Get-ToggleTarget
+  if (-not $target) { 'Need at least two modes to toggle.'; return }
   Invoke-Mode $target; return
 }
 
@@ -424,11 +429,12 @@ function Show-Settings {
   $cbPad = New-Object System.Windows.Forms.CheckBox; $cbPad.Text = 'When an Xbox controller connects, ask to switch to:'
   $cbPad.SetBounds(12, 388, 300, 22); $cbPad.Checked = [bool]$c.controllerPrompt; $f.Controls.Add($cbPad)
   $cbPadMode = & $newCombo 308 386 140 $c.controllerMode
-  $cbCombo = New-Object System.Windows.Forms.CheckBox; $cbCombo.Text = 'Controller: tap View + Menu to open the mode menu'
-  $cbCombo.SetBounds(12, 414, 436, 22); $cbCombo.Checked = [bool]$c.controllerMenuCombo; $f.Controls.Add($cbCombo)
-  $cbHold = New-Object System.Windows.Forms.CheckBox; $cbHold.Text = 'Hold View + Menu (1 s) to switch to:'
-  $cbHold.SetBounds(12, 440, 290, 22); $cbHold.Checked = [bool]$c.controllerHoldMode; $f.Controls.Add($cbHold)
-  $cbHoldMode = & $newCombo 308 438 140 $c.controllerHoldMode
+  $cbVA = New-Object System.Windows.Forms.CheckBox; $cbVA.Text = 'Controller: hold View + double-tap A to switch to:'
+  $cbVA.SetBounds(12, 414, 296, 22); $cbVA.Checked = [bool]$c.controllerViewA; $f.Controls.Add($cbVA)
+  $cbVAMode = & $newCombo 308 412 140 $c.controllerViewA
+  $cbVB = New-Object System.Windows.Forms.CheckBox; $cbVB.Text = 'Controller: hold View + double-tap B to switch to:'
+  $cbVB.SetBounds(12, 440, 296, 22); $cbVB.Checked = [bool]$c.controllerViewB; $f.Controls.Add($cbVB)
+  $cbVBMode = & $newCombo 308 438 140 $c.controllerViewB
 
   $open = New-Object System.Windows.Forms.LinkLabel; $open.Text = 'Open config.json'; $open.SetBounds(12, 490, 200, 20)
   $open.Add_Click({ if (-not (Test-Path $CfgPath)) { Save-Config (Get-Config) }; Start-Process notepad.exe $CfgPath }); $f.Controls.Add($open)
@@ -437,8 +443,9 @@ function Show-Settings {
   $ok.Add_Click({
     $c = Get-Config; $c.moveWindows = $cbMove.Checked; $c.settleDelayMs = [int]$nd.Value
     $c.startupAction = @('none', 'last', 'mode')[$cbStart.SelectedIndex]; $c.startupMode = [string]$cbStartMode.SelectedItem
-    $c.controllerPrompt = $cbPad.Checked; $c.controllerMode = [string]$cbPadMode.SelectedItem; $c.controllerMenuCombo = $cbCombo.Checked
-    $c.controllerHoldMode = if ($cbHold.Checked) { [string]$cbHoldMode.SelectedItem } else { '' }
+    $c.controllerPrompt = $cbPad.Checked; $c.controllerMode = [string]$cbPadMode.SelectedItem
+    $c.controllerViewA = if ($cbVA.Checked) { [string]$cbVAMode.SelectedItem } else { '' }
+    $c.controllerViewB = if ($cbVB.Checked) { [string]$cbVBMode.SelectedItem } else { '' }
     Save-Config $c
     Set-Autostart $cbAuto.Checked; $f.Close()
   })
@@ -447,6 +454,16 @@ function Show-Settings {
   [void]$f.ShowDialog()
 }
 Add-Type -AssemblyName Microsoft.VisualBasic
+Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using System.Windows.Forms;
+public class MMSHotkey : NativeWindow {
+  [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr h,int id,int mod,int vk);
+  public event EventHandler Pressed;
+  public MMSHotkey(){ CreateHandle(new CreateParams()); }
+  public bool Register(int mod,int vk){ return RegisterHotKey(Handle,1,mod|0x4000,vk); }  // 0x4000 = MOD_NOREPEAT
+  protected override void WndProc(ref Message m){ if(m.Msg==0x312&&Pressed!=null) Pressed(this,EventArgs.Empty); base.WndProc(ref m); }
+}
+'@
 
 $script:icon = New-TrayIcon
 if ($Settings) { Show-Settings; return }
@@ -531,26 +548,57 @@ if ($startMode -and ($cfg0.modes | Where-Object { $_.name -eq $startMode })) {
   $st.Add_Tick({ $st.Stop(); Switch-WithTip $startMode }); $st.Start()
 }
 
-# Controller watcher: prompt on connect, View+Menu opens the picker
+# Global toggle hotkey (default Ctrl+#)
+function Get-HotkeyParts([string]$s) {
+  $mod = 0; $vk = 0
+  foreach ($part in ($s -split '\+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    switch -regex ($part) {
+      '^(ctrl|strg|control)$' { $mod = $mod -bor 2; continue }
+      '^alt$' { $mod = $mod -bor 1; continue }
+      '^shift$' { $mod = $mod -bor 4; continue }
+      '^win$' { $mod = $mod -bor 8; continue }
+      default {
+        if ($part -eq '#') { $vk = 0xBF }   # '#' key on German layout (VK_OEM_2)
+        else { try { $vk = [int][System.Windows.Forms.Keys]$part } catch { $vk = 0 } }
+      }
+    }
+  }
+  @($mod, $vk)
+}
+$hk = Get-HotkeyParts $cfg0.toggleHotkey
+if ($hk[1]) {
+  $script:hotkey = New-Object MMSHotkey
+  if ($script:hotkey.Register($hk[0], $hk[1])) {
+    $script:hotkey.add_Pressed({
+      if ($script:busy) { return }
+      $tg = Get-ToggleTarget
+      if ($tg) { $script:busy = $true; Switch-WithTip $tg; $script:busy = $false }
+    })
+  } else { $ni.ShowBalloonTip(4000, $AppName, "Hotkey $($cfg0.toggleHotkey) is already used by another program.", 'Warning') }
+}
+
+# Controller watcher: optional prompt on connect; hold View + double-tap A / B switches mode
 $script:padWas = ([MMS]::Pad() -ge 0); $script:padPrev = 0; $script:busy = $false
-$pt = New-Object System.Windows.Forms.Timer; $pt.Interval = 200
+$script:tapA = [DateTime]::MinValue; $script:tapB = [DateTime]::MinValue
+$pt = New-Object System.Windows.Forms.Timer; $pt.Interval = 50
 $pt.Add_Tick({
   if ($script:busy) { return }
   $p = [MMS]::Pad(); $c = Get-Config; $choice = $null; $ask = $false; $title = ''
   if ($p -ge 0 -and -not $script:padWas -and $c.controllerPrompt -and $c.controllerMode -and $c.lastMode -ne $c.controllerMode) {
     $ask = $true; $title = 'Controller connected - switch mode?'
   }
-  # View + Menu: hold 1 s = switch straight to controllerHoldMode, short press = open the menu
-  $combo = ($p -ge 0) -and (($p -band 0x30) -eq 0x30)
-  if ($combo -and -not $script:holdStart) { $script:holdStart = [DateTime]::Now; $script:holdDone = $false }
-  if ($combo -and -not $script:holdDone -and $c.controllerHoldMode -and ([DateTime]::Now - $script:holdStart).TotalMilliseconds -ge 1000) {
-    $script:holdDone = $true; $script:busy = $true; Switch-WithTip $c.controllerHoldMode; $script:busy = $false
-  }
-  if (-not $combo -and $script:holdStart) {
-    if (-not $script:holdDone -and $c.controllerMenuCombo) { $ask = $true; $title = 'Switch monitor mode' }
-    $script:holdStart = $null
-  }
+  $now = [DateTime]::Now; $target = $null
+  if ($p -ge 0 -and ($p -band 0x20)) {   # View held
+    $new = $p -band (-bnot $script:padPrev)
+    if ($new -band 0x1000) {
+      if (($now - $script:tapA).TotalMilliseconds -le 500) { $target = $c.controllerViewA; $script:tapA = [DateTime]::MinValue } else { $script:tapA = $now }
+    }
+    if ($new -band 0x2000) {
+      if (($now - $script:tapB).TotalMilliseconds -le 500) { $target = $c.controllerViewB; $script:tapB = [DateTime]::MinValue } else { $script:tapB = $now }
+    }
+  } else { $script:tapA = [DateTime]::MinValue; $script:tapB = [DateTime]::MinValue }
   $script:padWas = ($p -ge 0); $script:padPrev = [Math]::Max(0, $p)
+  if ($target) { $script:busy = $true; Switch-WithTip $target; $script:busy = $false; return }
   if ($ask) {
     $script:busy = $true
     $pre = if ($c.controllerMode) { $c.controllerMode } else { $c.lastMode }
