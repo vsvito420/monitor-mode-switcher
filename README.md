@@ -1,71 +1,78 @@
 # Monitor Mode Switcher
 
-A tiny Windows tray tool that switches between saved multi-monitor layouts with one click
-— e.g. **Desk** (1440p main + side monitor on the right) and **Bed/Couch** (TV or 1080p main + side monitor on the left).
+Ein kleines Windows-Tool im Infobereich, das mit einem Klick zwischen gespeicherten Monitor-Layouts umschaltet,
+z. B. **Schreibtisch** (1440p-Hauptmonitor + Seitenmonitor rechts) und **Bett/Couch** (TV oder 1080p als Hauptmonitor + Seitenmonitor links).
 
-- Turns monitors on/off, sets primary, positions, resolution and refresh rate
-- **Moves your windows along**: windows on monitors that stay on keep their monitor. If a monitor is
-  turned off, its windows go to the new primary (if it was the primary) or to a side monitor that
-  stays on (if it was a side monitor). Maximized and borderless-fullscreen windows stay that way.
-- **Switches the audio output** per mode (e.g. Bed → the TV's/monitor's HDMI audio)
-- **Remembers the last mode** after reboot, or always starts in a default mode of your choice
-- **Xbox controller**: hold **View** and **double-tap A** or **double-tap B** to switch straight to a
-  mode you choose (e.g. A = Desk, B = Bed). Optionally asks "switch to Bed?" when a controller connects.
-- **Keyboard shortcut** `Ctrl+#` (configurable) toggles between two modes
-- Tray icon (current mode is checked), settings window, autostart option
-- Plain JSON config + CLI, so an **AI assistant can set it up for you** (see [AGENTS.md](AGENTS.md))
-- No install, no dependencies — just PowerShell 5.1, which ships with Windows 10/11
+- Schaltet Monitore an/aus, setzt Hauptmonitor, Position, Auflösung und Bildwiederholrate
+- **Nimmt deine Fenster mit**: Fenster auf Monitoren, die an bleiben, bleiben dort. Wird ein Monitor ausgeschaltet,
+  wandern seine Fenster auf den neuen Hauptmonitor (wenn er der Hauptmonitor war) oder auf einen Seitenmonitor, der an
+  bleibt. Maximierte und randlose Vollbild-Fenster bleiben so.
+- **Merkt sich die Audio-Ausgabe pro Modus**: Wählst du in Windows eine andere Ausgabe, merkt sich der aktuelle Modus
+  das; beim nächsten Wechsel zurück wird sie wiederhergestellt, falls das Gerät da ist (sonst bleibt Audio unverändert)
+- **Merkt sich den letzten Modus** über einen Neustart hinweg oder startet immer in einem festen Modus
+- **Xbox-Controller**: **Ansicht** halten und **2x A** oder **2x B** tippen schaltet direkt auf einen gewählten Modus
+  (z. B. A = Schreibtisch, B = Bett). Optional kommt beim Verbinden eines Controllers die Frage „auf Bett wechseln?“.
+- **Tastenkürzel** `Strg+#` (einstellbar) wechselt zwischen zwei Modi
+- Symbol im Infobereich (aktueller Modus ist abgehakt), Einstellungsfenster, Autostart
+- Einfache JSON-Konfiguration + Kommandozeile, damit **ein KI-Assistent es für dich einrichten kann** (siehe [AGENTS.md](AGENTS.md))
+- Keine Installation, keine Abhängigkeiten – nur PowerShell 5.1, das in Windows 10/11 enthalten ist
 
-## Install
+## Installation
 
-1. Download this repo (Code → Download ZIP) and unzip it somewhere permanent, e.g. `C:\Tools\MonitorModeSwitcher`.
-2. Double-click **`MonitorModeSwitcher.vbs`**. A monitor icon appears in the tray (check the `^` overflow).
+1. Repo herunterladen (Code → Download ZIP) und dauerhaft entpacken, z. B. nach `C:\Tools\MonitorModeSwitcher`.
+2. **`MonitorModeSwitcher.vbs`** doppelklicken. Im Infobereich erscheint ein Monitor-Symbol (ggf. unter `^`).
 
-## Set up your modes
+## Modi einrichten
 
-1. Arrange your monitors in **Windows Settings → System → Display** the way you want for mode 1
-   (which monitors are on, which is primary, where they sit).
-2. Tray icon → **Settings… → Save current as new…** → give it a name (e.g. `Desk`).
-3. Rearrange in Windows display settings for mode 2, save again (e.g. `Bed`).
-4. Done. Click the tray icon and pick a mode.
+1. Monitore in **Windows-Einstellungen → System → Anzeige** so anordnen, wie du sie für Modus 1 willst
+   (welche Monitore an sind, welcher Hauptmonitor ist, wo sie stehen).
+2. Symbol → **Einstellungen… → Aktuelles neu speichern…** → Namen eingeben (z. B. `Schreibtisch`).
+3. In den Windows-Anzeigeeinstellungen für Modus 2 umstellen und wieder speichern (z. B. `Bett`).
+4. Fertig. Aufs Symbol klicken und einen Modus wählen.
 
-Settings also has: rename/overwrite/delete modes, **Start with Windows**, toggle window moving,
-and the wait time before windows are moved.
+In den Einstellungen gibt es außerdem: Modi umbenennen/überschreiben/löschen, **Mit Windows starten**, Fenster
+mitnehmen an/aus und die Wartezeit, bevor Fenster verschoben werden.
 
-### Let an AI do it
+### Von einer KI einrichten lassen
 
-Open this folder in Claude Code (or any coding agent) and say something like:
+Den Ordner in Claude Code (oder einem anderen Coding-Agenten) öffnen und z. B. sagen:
 
-> Set up Monitor Mode Switcher: "Desk" = my 1440p monitor as main with the Lenovo to the right,
-> "Bed" = the 1080p 165 Hz monitor as main with the Lenovo to the left. Enable autostart.
+> Richte den Monitor Mode Switcher ein: „Schreibtisch“ = mein 1440p-Monitor als Hauptmonitor mit dem Lenovo rechts,
+> „Bett“ = der 1080p-165-Hz-Monitor als Hauptmonitor mit dem Lenovo links. Autostart an.
 
-The agent follows [AGENTS.md](AGENTS.md).
+Der Agent folgt [AGENTS.md](AGENTS.md).
 
-## Command line
+## Kommandozeile
 
 ```powershell
-.\MonitorModeSwitcher.ps1 -List              # connected monitors as JSON
-.\MonitorModeSwitcher.ps1 -Modes             # saved modes as JSON
-.\MonitorModeSwitcher.ps1 -Mode "Desk"       # switch
-.\MonitorModeSwitcher.ps1 -Capture "Desk"    # save the current Windows layout as a mode
-.\MonitorModeSwitcher.ps1 -Delete "Desk"
+.\MonitorModeSwitcher.ps1 -List              # angeschlossene Monitore als JSON
+.\MonitorModeSwitcher.ps1 -Modes             # gespeicherte Modi als JSON
+.\MonitorModeSwitcher.ps1 -Audio             # Audio-Ausgabegeräte als JSON
+.\MonitorModeSwitcher.ps1 -Mode "Schreibtisch"     # umschalten
+.\MonitorModeSwitcher.ps1 -Capture "Schreibtisch"  # aktuelles Windows-Layout als Modus speichern
+.\MonitorModeSwitcher.ps1 -Delete "Schreibtisch"
 .\MonitorModeSwitcher.ps1 -Settings
 ```
 
-**One-click toggle on the taskbar:** `Toggle.vbs` (or `MonitorModeSwitcher.ps1 -Toggle`) switches
-between two modes — `toggleModes` in config.json, default the first two modes. Create a shortcut
-to `wscript.exe "C:\path\Toggle.vbs"`, give it `icon.ico` (generated on first tray start), put it in the
-Start menu and choose "Pin to taskbar".
+**Ein-Klick-Umschalter in der Taskleiste:** `Toggle.vbs` (oder `MonitorModeSwitcher.ps1 -Toggle`) wechselt zwischen
+zwei Modi – `toggleModes` in config.json, sonst die ersten zwei Modi. Eine Verknüpfung auf
+`wscript.exe "C:\Pfad\Toggle.vbs"` anlegen, ihr `icon.ico` geben (wird beim ersten Tray-Start erzeugt), ins Startmenü
+legen und „An Taskleiste anheften“ wählen.
 
-Hotkey tip: create a shortcut to `wscript.exe "C:\path\MonitorModeSwitcher.vbs" "Desk"`, then set a
-shortcut key in its Properties.
+Tastenkürzel-Tipp: Verknüpfung auf `wscript.exe "C:\Pfad\MonitorModeSwitcher.vbs" "Schreibtisch"` anlegen und in
+deren Eigenschaften eine Tastenkombination setzen.
 
-## Limitations
+## Probleme?
 
-- Games in **exclusive** fullscreen can't be moved reliably — use borderless/windowed fullscreen.
-- Two monitors of the *same model* share the same id; the first one found is used.
-- Minimized windows are left to Windows.
+Rechtsklick aufs Symbol → **Diagnose-Log öffnen** (`%APPDATA%\MonitorModeSwitcher\log.txt`). Dort stehen jede
+Umschaltung und alle Fehler.
 
-## License
+## Grenzen
+
+- Spiele im **exklusiven** Vollbild lassen sich nicht zuverlässig verschieben – besser randloses Fenster/Vollbild-Fenster.
+- Zwei Monitore *desselben Modells* haben dieselbe ID; es wird der zuerst gefundene benutzt.
+- Minimierte Fenster überlässt das Tool Windows.
+
+## Lizenz
 
 MIT

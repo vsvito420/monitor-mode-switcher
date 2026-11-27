@@ -1,15 +1,17 @@
-<#
-  Monitor Mode Switcher - switch between saved multi-monitor layouts from the tray.
-  Windows on a monitor that gets turned off are moved to the new primary monitor.
+﻿<#
+  Monitor Mode Switcher - zwischen gespeicherten Monitor-Layouts per Infobereich-Symbol umschalten.
+  Fenster auf einem Monitor, der ausgeschaltet wird, wandern auf einen Monitor, der an bleibt.
 
-  Usage:
-    MonitorModeSwitcher.ps1                    Start tray app
-    MonitorModeSwitcher.ps1 -List              Print connected monitors as JSON
-    MonitorModeSwitcher.ps1 -Modes             Print saved modes as JSON
-    MonitorModeSwitcher.ps1 -Mode "Desk"       Switch to a saved mode
-    MonitorModeSwitcher.ps1 -Capture "Desk"    Save the current Windows layout as a mode
-    MonitorModeSwitcher.ps1 -Delete "Desk"     Delete a mode
-    MonitorModeSwitcher.ps1 -Settings          Open the settings window
+  Aufruf:
+    MonitorModeSwitcher.ps1                    Tray-App starten
+    MonitorModeSwitcher.ps1 -List              Angeschlossene Monitore als JSON
+    MonitorModeSwitcher.ps1 -Modes             Gespeicherte Modi als JSON
+    MonitorModeSwitcher.ps1 -Audio             Audio-Ausgabegeräte als JSON
+    MonitorModeSwitcher.ps1 -Mode "Desk"       Auf einen Modus umschalten
+    MonitorModeSwitcher.ps1 -Toggle            Zwischen den beiden Umschalt-Modi wechseln
+    MonitorModeSwitcher.ps1 -Capture "Desk"    Aktuelles Windows-Layout als Modus speichern
+    MonitorModeSwitcher.ps1 -Delete "Desk"     Modus löschen
+    MonitorModeSwitcher.ps1 -Settings          Einstellungsfenster öffnen
 #>
 param(
   [string]$Mode, [string]$Capture, [string]$Delete,
@@ -18,7 +20,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $AppName = 'Monitor Mode Switcher'
+$AppVersion = '1.2.0'
 $CfgPath = Join-Path $PSScriptRoot 'config.json'
+$LogPath = Join-Path $env:APPDATA 'MonitorModeSwitcher\log.txt'
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type -ReferencedAssemblies System.Drawing, System.Windows.Forms -TypeDefinition @'
@@ -58,7 +62,7 @@ public static class MMS {
 
   public class Disp{ public string Id,DeviceId,Dev; public bool Active,Primary; public int X,Y,W,H,Hz; }
 
-  // All connected monitors (active or not). Id = model code from the EDID, e.g. "ACR0915".
+  // Alle angeschlossenen Monitore (aktiv oder nicht). Id = Modell-Code aus dem EDID, z. B. "ACR0915".
   public static List<Disp> List(){
     InitDpi(); var res=new List<Disp>();
     for(uint i=0;i<64;i++){ var a=new DISPLAY_DEVICE(); a.cb=Marshal.SizeOf(a); if(!EnumDisplayDevices(null,i,ref a,0)) continue;
@@ -79,7 +83,7 @@ public static class MMS {
     if(w>0){ dm.dmFields|=0x400000|0x40000; dm.dmDisplayFrequency=hz>0?hz:BestFreq(dev,w,h); dm.dmBitsPerPel=32; }
     return ChangeDisplaySettingsEx(dev,ref dm,IntPtr.Zero,0x10000001u|(primary?0x10u:0u),IntPtr.Zero); }
 
-  // ---- window tracking ----
+  // ---- Fenster mitnehmen ----
   class Win{ public IntPtr H; public string Id; public double FX,FY,FW,FH; public bool Max,Full; }
   static MONITORINFOEX Info(IntPtr m){ var i=new MONITORINFOEX(); i.cb=Marshal.SizeOf(i); GetMonitorInfo(m,ref i); return i; }
   static List<Win> Snapshot(Dictionary<string,string> devToId){
@@ -91,6 +95,7 @@ public static class MMS {
       int cl; if(DwmGetWindowAttribute(h,14,out cl,4)==0&&cl!=0) return true;
       RECT r; GetWindowRect(h,out r); var mi=Info(MonitorFromWindow(h,2));
       var m=mi.rcMonitor; var wa=mi.rcWork; double ww=wa.R-wa.L, wh=wa.B-wa.T;
+      if(ww<=0||wh<=0) return true;
       string id; devToId.TryGetValue(mi.szDevice,out id);
       list.Add(new Win{H=h,Id=id,Max=IsZoomed(h),Full=r.L<=m.L&&r.T<=m.T&&r.R>=m.R&&r.B>=m.B,
         FX=(r.L-wa.L)/ww,FY=(r.T-wa.T)/wh,FW=(r.R-r.L)/ww,FH=(r.B-r.T)/wh});
@@ -102,8 +107,8 @@ public static class MMS {
     EnumDisplayMonitors(IntPtr.Zero,IntPtr.Zero,(IntPtr m,IntPtr dc,ref RECT r,IntPtr l)=>{ var i=Info(m); d[i.szDevice]=i; return true; },IntPtr.Zero);
     return d; }
 
-  // Windows on a monitor that is still on stay there. Windows on a monitor that was turned off go to:
-  //   old primary -> new primary;  old side monitor -> a side monitor that is still on (else new primary).
+  // Fenster auf einem Monitor, der an bleibt, bleiben dort. Fenster auf einem ausgeschalteten Monitor gehen:
+  //   alter Hauptmonitor -> neuer Hauptmonitor;  alter Seitenmonitor -> ein Seitenmonitor, der an bleibt (sonst Hauptmonitor).
   static void Restore(List<Win> wins,string oldPrimId,HashSet<string> wasActive){
     var mons=Monitors(); var idToDev=new Dictionary<string,string>(); string prim=null, side=null, sideKept=null;
     foreach(var d in List()) if(d.Active){ idToDev[d.Id]=d.Dev;
@@ -119,28 +124,65 @@ public static class MMS {
         int x=wa.L+Math.Max(0,Math.Min(W-ww,(int)(w.FX*W))), y=wa.T+Math.Max(0,Math.Min(Hh-hh,(int)(w.FY*Hh)));
         SetWindowPos(w.H,IntPtr.Zero,x,y,ww,hh,0x14); } } }
 
-  // Apply a layout. Monitors not listed are turned off.
+  // ---- Fensterpositionen pro Modus merken ----
+  [StructLayout(LayoutKind.Sequential)] struct POINT{public int X,Y;}
+  [StructLayout(LayoutKind.Sequential)] struct WINDOWPLACEMENT{public int length,flags,showCmd; public POINT min,max; public RECT normal;}
+  [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h,ref WINDOWPLACEMENT p);
+  [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr h,ref WINDOWPLACEMENT p);
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+  static bool Normal(IntPtr h){
+    if(!IsWindowVisible(h)||GetWindowTextLength(h)==0) return false;
+    if(GetWindow(h,4)!=IntPtr.Zero) return false;
+    if((GetWindowLong(h,-20)&0x80)!=0) return false;
+    int cl; if(DwmGetWindowAttribute(h,14,out cl,4)==0&&cl!=0) return false;
+    return true; }
+  // Eine Zeile pro Fenster: "hwnd flags showCmd L T R B" (normale Position + maximiert/minimiert)
+  public static string[] CaptureWindows(){
+    InitDpi(); var res=new List<string>();
+    EnumWindows((h,l)=>{ if(!Normal(h)) return true;
+      var p=new WINDOWPLACEMENT(); p.length=Marshal.SizeOf(p); if(!GetWindowPlacement(h,ref p)) return true;
+      res.Add(h.ToInt64()+" "+p.flags+" "+p.showCmd+" "+p.normal.L+" "+p.normal.T+" "+p.normal.R+" "+p.normal.B);
+      return true; },IntPtr.Zero);
+    return res.ToArray(); }
+  // Fenster, die es noch gibt, an ihre gemerkte Stelle setzen. Liefert die Anzahl.
+  public static int PlaceWindows(string[] lines){
+    InitDpi(); int n=0;
+    foreach(var s in lines){ var a=s.Split(' '); long hv; if(a.Length<7||!long.TryParse(a[0],out hv)) continue;
+      var h=new IntPtr(hv); if(!IsWindow(h)||!Normal(h)) continue;
+      var p=new WINDOWPLACEMENT(); p.length=Marshal.SizeOf(p); if(!GetWindowPlacement(h,ref p)) continue;
+      int show=int.Parse(a[2]); bool max=show==3, min=IsIconic(h);
+      p.flags=int.Parse(a[1])&2; // nur WPF_RESTORETOMAXIMIZED übernehmen
+      p.normal=new RECT{L=int.Parse(a[3]),T=int.Parse(a[4]),R=int.Parse(a[5]),B=int.Parse(a[6])};
+      p.showCmd=min?7:4;  // jetzt minimiert bleibt minimiert; sonst normal ohne Aktivieren
+      if(!SetWindowPlacement(h,ref p)) continue;
+      if(max&&!min) ShowWindow(h,3);
+      n++; }
+    return n; }
+
+  // Layout anwenden. Nicht aufgeführte Monitore werden ausgeschaltet.
   public static string Apply(string[] ids,bool[] prim,int[] x,int[] y,int[] w,int[] h,int[] hz,bool move,int delay){
     var before=List(); var devToId=new Dictionary<string,string>();
     string oldPrim=null; var wasActive=new HashSet<string>();
     foreach(var d in before) if(d.Active){ devToId[d.Dev]=d.Id; wasActive.Add(d.Id); if(d.Primary) oldPrim=d.Id; }
-    var wins=move?Snapshot(devToId):null;
-    var used=new HashSet<string>(); int r=0;
+    var used=new HashSet<string>(); var devs=new string[ids.Length];
+    // Erst prüfen, ob alle Monitore da sind - dann erst etwas ändern
     for(int i=0;i<ids.Length;i++){
       var d=before.Find(z=>z.Id.Equals(ids[i],StringComparison.OrdinalIgnoreCase)&&!used.Contains(z.Dev));
-      if(d==null) return "Monitor not connected: "+ids[i];
-      used.Add(d.Dev); r|=Set(d.Dev,x[i],y[i],w[i],h[i],hz[i],prim[i]); }
+      if(d==null) return "Monitor nicht angeschlossen: "+ids[i];
+      used.Add(d.Dev); devs[i]=d.Dev; }
+    var wins=move?Snapshot(devToId):null; int r=0;
+    for(int i=0;i<ids.Length;i++) r|=Set(devs[i],x[i],y[i],w[i],h[i],hz[i],prim[i]);
     foreach(var d in before) if(d.Active&&!used.Contains(d.Dev)) r|=Set(d.Dev,0,0,0,0,0,false);
     int c=ChangeDisplaySettingsEx(null,IntPtr.Zero,IntPtr.Zero,0,IntPtr.Zero);
-    if(r!=0||c!=0) return "Windows rejected the layout (code "+r+"/"+c+")";
+    if(r!=0||c!=0) return "Windows hat das Layout abgelehnt (Code "+r+"/"+c+")";
     if(move&&wins.Count>0){ Thread.Sleep(delay); Restore(wins,oldPrim,wasActive); Thread.Sleep(1500); Restore(wins,oldPrim,wasActive); }
     return null; }
 
-  // ---- Xbox / XInput controller ----
+  // ---- Xbox / XInput-Controller ----
   [StructLayout(LayoutKind.Sequential)] struct XSTATE{ public uint Packet; public ushort Buttons; public byte LT,RT; public short LX,LY,RX,RY; }
   [DllImport("xinput1_4.dll")] static extern int XInputGetState(int i,out XSTATE s);
-  // -1 = no controller. Otherwise button bits; left stick is folded into the D-pad bits
-  // (Up 0x1, Down 0x2, Left 0x4, Right 0x8, Start 0x10, Back/View 0x20, A 0x1000, B 0x2000).
+  // -1 = kein Controller. Sonst Tasten-Bits; der linke Stick wird auf die Steuerkreuz-Bits gelegt
+  // (Hoch 0x1, Runter 0x2, Links 0x4, Rechts 0x8, Start 0x10, Back/Ansicht 0x20, A 0x1000, B 0x2000).
   public static int Pad(){
     try{ for(int i=0;i<4;i++){ XSTATE s; if(XInputGetState(i,out s)!=0) continue;
       int b=s.Buttons; if(s.LY>16000)b|=1; if(s.LY<-16000)b|=2; if(s.LX<-16000)b|=4; if(s.LX>16000)b|=8; return b; } }catch{}
@@ -148,12 +190,13 @@ public static class MMS {
 }
 '@
 
-# Audio output switching (Core Audio; IPolicyConfig is undocumented but used by Windows itself)
+# Audio-Ausgabe umschalten (Core Audio; IPolicyConfig ist undokumentiert, wird aber von Windows selbst benutzt)
 Add-Type -TypeDefinition @'
 using System; using System.Collections.Generic; using System.Runtime.InteropServices;
 public static class MMSAudio {
   [StructLayout(LayoutKind.Sequential)] struct PROPERTYKEY{ public Guid fmtid; public int pid; }
   [StructLayout(LayoutKind.Explicit)] struct PROPVARIANT{ [FieldOffset(0)] public short vt; [FieldOffset(8)] public IntPtr p; [FieldOffset(16)] public IntPtr pad; }
+  [DllImport("ole32.dll")] static extern int PropVariantClear(ref PROPVARIANT v);
   [ComImport,Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
   interface IMMDeviceEnumerator{ [PreserveSig] int EnumAudioEndpoints(int flow,int mask,out IMMDeviceCollection c);
     [PreserveSig] int GetDefaultAudioEndpoint(int flow,int role,out IMMDevice d); }
@@ -172,20 +215,24 @@ public static class MMSAudio {
 
   public class Dev{ public string Id,Name; public bool Default; }
   static string Name(IMMDevice d){
-    IPropertyStore ps; if(d.OpenPropertyStore(0,out ps)!=0) return null;
+    IPropertyStore ps; if(d.OpenPropertyStore(0,out ps)!=0||ps==null) return null;
     var k=new PROPERTYKEY{fmtid=new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"),pid=14}; PROPVARIANT v;
-    if(ps.GetValue(ref k,out v)!=0||v.vt!=31) return null; return Marshal.PtrToStringUni(v.p); }
+    if(ps.GetValue(ref k,out v)!=0) return null;
+    string n=v.vt==31&&v.p!=IntPtr.Zero?Marshal.PtrToStringUni(v.p):null;
+    PropVariantClear(ref v);   // gibt den String frei - die Liste wird alle 2 s abgefragt
+    return n; }
 
-  // Active playback devices
+  // Aktive Wiedergabegeräte
   public static List<Dev> List(){
     var res=new List<Dev>(); var en=(IMMDeviceEnumerator)new MMDeviceEnumerator();
-    IMMDevice def; string defId=null; if(en.GetDefaultAudioEndpoint(0,1,out def)==0) def.GetId(out defId);
-    IMMDeviceCollection col; if(en.EnumAudioEndpoints(0,1,out col)!=0) return res;
-    int n; col.GetCount(out n);
-    for(int i=0;i<n;i++){ IMMDevice d; col.Item(i,out d); string id; d.GetId(out id); res.Add(new Dev{Id=id,Name=Name(d),Default=id==defId}); }
+    IMMDevice def; string defId=null; if(en.GetDefaultAudioEndpoint(0,1,out def)==0&&def!=null) def.GetId(out defId);
+    IMMDeviceCollection col; if(en.EnumAudioEndpoints(0,1,out col)!=0||col==null) return res;
+    int n; if(col.GetCount(out n)!=0) return res;
+    for(int i=0;i<n;i++){ IMMDevice d; if(col.Item(i,out d)!=0||d==null) continue; string id; if(d.GetId(out id)!=0) continue;
+      res.Add(new Dev{Id=id,Name=Name(d),Default=id==defId}); }
     return res; }
 
-  // Set default output (all roles) to the first device whose name contains `match`. Returns the name or null.
+  // Standardausgabe (alle Rollen) auf das erste Gerät setzen, dessen Name `match` enthält. Gibt den Namen zurück oder null.
   public static string SetDefault(string match){
     foreach(var d in List()) if(d.Name!=null&&d.Name.IndexOf(match,StringComparison.OrdinalIgnoreCase)>=0){
       var pc=(IPolicyConfig)new PolicyConfigClient(); for(int r=0;r<3;r++) pc.SetDefaultEndpoint(d.Id,r); return d.Name; }
@@ -193,35 +240,67 @@ public static class MMSAudio {
 }
 '@
 
-# ---------------- config ----------------
+# ---------------- Log ----------------
+# %APPDATA%\MonitorModeSwitcher\log.txt (wie bei den anderen Tools in C:\Tools)
+function Write-Log([string]$text) {
+  try {
+    $dir = Split-Path $LogPath
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory $dir | Out-Null }
+    if ((Test-Path $LogPath) -and (Get-Item $LogPath).Length -gt 256KB) { Remove-Item $LogPath -Force }
+    [IO.File]::AppendAllText($LogPath, ('{0:yyyy-MM-dd HH:mm:ss.fff}  {1}' -f (Get-Date), $text) + "`r`n", [Text.Encoding]::UTF8)
+  } catch {}
+}
+
+# ---------------- Konfiguration ----------------
 function Get-Config {
   $c = $null
   $stamp = if (Test-Path $CfgPath) { (Get-Item $CfgPath).LastWriteTimeUtc.Ticks } else { 0 }
-  if ($script:cfgCache -and $script:cfgStamp -eq $stamp) {
-    return $script:cfgCache   # file unchanged since last read
+  if ($script:cfgCache -and ($script:cfgStamp -eq $stamp -or $script:cfgBadStamp -eq $stamp)) {
+    return $script:cfgCache   # Datei unverändert (oder kaputt und schon gemeldet)
   }
-  if ($stamp) { $c = Get-Content $CfgPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+  if ($stamp) {
+    try { $c = Get-Content $CfgPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch {
+      # z. B. gerade halb geschrieben oder von Hand falsch bearbeitet: mit dem letzten guten Stand weitermachen
+      if ($script:cfgBadStamp -ne $stamp) { Write-Log "config.json ist fehlerhaft: $($_.Exception.Message)" }
+      $script:cfgBadStamp = $stamp
+      if ($script:cfgCache) { return $script:cfgCache }
+      throw "config.json ist fehlerhaft: $($_.Exception.Message)"
+    }
+  }
   if (-not $c) { $c = [pscustomobject]@{} }
   $defaults = @{
     moveWindows = $true; settleDelayMs = 3000; modes = @()
+    rememberWindows = $true     # Fensterpositionen pro Modus merken und beim Zurückwechseln wiederherstellen
     startupAction = 'last'      # none | last | mode
-    startupMode = ''            # used when startupAction = mode
-    lastMode = ''               # written automatically on every switch
-    controllerPrompt = $false   # ask to switch when an Xbox controller connects
-    controllerMode = ''         # mode preselected in that prompt
-    controllerViewA = ''        # hold View + double-tap A switches to this mode ('' = off)
-    controllerViewB = ''        # hold View + double-tap B switches to this mode ('' = off)
-    toggleModes = @()           # -Toggle switches between these two modes (default: the first two modes)
-    toggleHotkey = 'Ctrl+#'     # global hotkey for the toggle while the tray runs ('' = off)
+    startupMode = ''            # wird bei startupAction = mode benutzt
+    lastMode = ''               # wird bei jedem Umschalten automatisch geschrieben
+    lastSwitch = 0              # Zeitpunkt des letzten Umschaltens (UTC-Ticks), automatisch
+    controllerPrompt = $false   # beim Verbinden eines Xbox-Controllers fragen, ob umgeschaltet werden soll
+    controllerMode = ''         # in dieser Abfrage vorausgewählter Modus
+    controllerViewA = ''        # Ansicht halten + 2x A schaltet auf diesen Modus ('' = aus)
+    controllerViewB = ''        # Ansicht halten + 2x B schaltet auf diesen Modus ('' = aus)
+    toggleModes = @()           # -Toggle wechselt zwischen diesen zwei Modi (Standard: die ersten zwei)
+    toggleHotkey = 'Ctrl+#'     # globales Tastenkürzel zum Umschalten, solange die Tray-App läuft ('' = aus)
   }
   foreach ($k in $defaults.GetEnumerator()) {
     if (-not ($c.PSObject.Properties.Name -contains $k.Key)) { $c | Add-Member $k.Key $k.Value }
   }
   $c.modes = @($c.modes | Where-Object { $_ })
-  $script:cfgCache = $c; $script:cfgStamp = $stamp
+  $script:cfgCache = $c; $script:cfgStamp = $stamp; $script:cfgBadStamp = $null
   $c
 }
-function Save-Config($c) { $c | ConvertTo-Json -Depth 6 | Set-Content $CfgPath -Encoding UTF8 }
+
+# Erst in eine Temp-Datei schreiben und dann ersetzen: so liest ein zweiter Prozess (Toggle.vbs, CLI)
+# nie eine halb geschriebene config.json.
+function Save-Config($c) {
+  $json = $c | ConvertTo-Json -Depth 6
+  $tmp = "$CfgPath.tmp"
+  [IO.File]::WriteAllText($tmp, $json, (New-Object Text.UTF8Encoding $true))
+  try {
+    if (Test-Path $CfgPath) { [IO.File]::Replace($tmp, $CfgPath, $null) } else { [IO.File]::Move($tmp, $CfgPath) }
+  } catch { Move-Item $tmp $CfgPath -Force }
+}
 
 function Get-Monitors {
   $names = @{}
@@ -251,71 +330,141 @@ function Save-CurrentLayout([string]$name) {
   $mode = [pscustomobject][ordered]@{ name = $name; audio = $(if ($old -and $old.audio) { $old.audio } else { '' }); displays = $disp }
   $c.modes = @($c.modes | Where-Object { $_.name -ne $name }) + $mode
   Save-Config $c
-  "Saved mode '$name' with $($disp.Count) monitor(s)."
+  Write-Log "Modus '$name' gespeichert ($($disp.Count) Monitor(e))"
+  "Modus '$name' mit $($disp.Count) Monitor(en) gespeichert."
+}
+
+# Verweise auf einen Modus in den Einstellungen umbenennen ($new) oder entfernen ($new = '')
+function Update-ModeRefs($c, [string]$old, [string]$new) {
+  foreach ($k in 'lastMode', 'startupMode', 'controllerMode', 'controllerViewA', 'controllerViewB') { if ($c.$k -eq $old) { $c.$k = $new } }
+  $c.toggleModes = @($c.toggleModes | ForEach-Object { if ($_ -eq $old) { $new } else { $_ } } | Where-Object { $_ })
+}
+
+function Rename-Mode([string]$old, [string]$new) {
+  $c = Get-Config
+  if ($old -eq $new) { return $null }
+  if ($c.modes | Where-Object { $_.name -eq $new }) { return "Es gibt schon einen Modus '$new'." }
+  $m = $c.modes | Where-Object { $_.name -eq $old } | Select-Object -First 1
+  if (-not $m) { return "Modus '$old' nicht gefunden." }
+  $m.name = $new; Update-ModeRefs $c $old $new; Save-Config $c
+  Write-Log "Modus '$old' umbenannt in '$new'"
+  $null
 }
 
 function Remove-Mode([string]$name) {
-  $c = Get-Config; $c.modes = @($c.modes | Where-Object { $_.name -ne $name }); Save-Config $c
+  $c = Get-Config; $c.modes = @($c.modes | Where-Object { $_.name -ne $name }); Update-ModeRefs $c $name ''; Save-Config $c
+  Write-Log "Modus '$name' gelöscht"
+}
+
+# Gemerkte Fensterpositionen pro Modus (Fenster-Handles gelten nur bis zur Abmeldung - veraltete werden übersprungen)
+$WinPath = Join-Path (Split-Path $LogPath) 'windows.json'
+function Get-WindowLayout([string]$mode) {
+  if (-not (Test-Path $WinPath)) { return @() }
+  try { $all = Get-Content $WinPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return @() }
+  @($all.$mode | Where-Object { $_ })
+}
+function Save-WindowLayout([string]$mode, [string[]]$lines) {
+  $all = $null
+  if (Test-Path $WinPath) { try { $all = Get-Content $WinPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { } }
+  if (-not $all) { $all = [pscustomobject]@{} }
+  $all | Add-Member -NotePropertyName $mode -NotePropertyValue @($lines) -Force
+  New-Item -ItemType Directory -Force (Split-Path $WinPath) | Out-Null
+  [IO.File]::WriteAllText($WinPath, ($all | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false))
 }
 
 function Invoke-Mode([string]$name) {
-  $c = Get-Config
-  $m = $c.modes | Where-Object { $_.name -eq $name } | Select-Object -First 1
-  if (-not $m) { return "Mode '$name' not found." }
-  $d = @($m.displays)
-  if (-not ($d | Where-Object primary)) { $d[0].primary = $true }
-  $err = [MMS]::Apply(
-    [string[]]($d | ForEach-Object id), [bool[]]($d | ForEach-Object { [bool]$_.primary }),
-    [int[]]($d | ForEach-Object x), [int[]]($d | ForEach-Object y),
-    [int[]]($d | ForEach-Object width), [int[]]($d | ForEach-Object height),
-    [int[]]($d | ForEach-Object { if ($_.refresh) { $_.refresh } else { 0 } }),
-    [bool]$c.moveWindows, [int]$c.settleDelayMs)
-  if ($err) { return $err }
-  $c = Get-Config; $c.lastMode = $name; Save-Config $c
-  $msg = "Switched to '$name'."
-  if ($m.audio) {
-    # the HDMI audio device of a monitor that was just turned on can take a few seconds to show up
-    $set = $null
-    for ($i = 0; $i -lt 16 -and -not $set; $i++) { try { $set = [MMSAudio]::SetDefault($m.audio) } catch {}; if (-not $set) { Start-Sleep -Milliseconds 500 } }
-    $msg += if ($set) { " Audio: $set" } else { " Audio device '$($m.audio)' not found." }
-  }
-  $msg
+  # Nur eine Umschaltung gleichzeitig - auch über Prozesse hinweg (Tray, Toggle.vbs, CLI)
+  $lock = New-Object System.Threading.Mutex($false, 'Local\MonitorModeSwitcherSwitch')
+  $got = $false
+  try { $got = $lock.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+  if (-not $got) { $lock.Dispose(); return 'Es läuft gerade schon eine Umschaltung.' }
+  try {
+    $c = Get-Config
+    $m = $c.modes | Where-Object { $_.name -eq $name } | Select-Object -First 1
+    if (-not $m) { return "Modus '$name' nicht gefunden." }
+    $d = @($m.displays | Where-Object { $_ })
+    if (-not $d) { return "Modus '$name' enthält keine Monitore." }
+    # Fensterpositionen des bisherigen Modus merken - nur wenn gerade wirklich dessen Monitore an sind
+    $remember = [bool]$c.rememberWindows
+    if ($remember -and $c.lastMode -and $c.lastMode -ne $name) {
+      $cur = $c.modes | Where-Object { $_.name -eq $c.lastMode } | Select-Object -First 1
+      $want = @($cur.displays | ForEach-Object id | Sort-Object) -join ','
+      $have = @([MMS]::List() | Where-Object Active | ForEach-Object Id | Sort-Object) -join ','
+      if ($cur -and $want -eq $have) { Save-WindowLayout $c.lastMode ([MMS]::CaptureWindows()) }
+    }
+    $c.lastSwitch = [DateTime]::UtcNow.Ticks; Save-Config $c   # Audio-Wechsel während des Umschaltens sind keine Nutzerwahl
+    $prim = [bool[]]($d | ForEach-Object { [bool]$_.primary })
+    if ($prim -notcontains $true) { $prim[0] = $true }
+    $err = [MMS]::Apply(
+      [string[]]($d | ForEach-Object id), $prim,
+      [int[]]($d | ForEach-Object x), [int[]]($d | ForEach-Object y),
+      [int[]]($d | ForEach-Object width), [int[]]($d | ForEach-Object height),
+      [int[]]($d | ForEach-Object { if ($_.refresh) { $_.refresh } else { 0 } }),
+      [bool]$c.moveWindows, [int]$c.settleDelayMs)
+    if ($err) { Write-Log "Umschalten auf '$name' fehlgeschlagen: $err"; return $err }
+    $moved = $c.moveWindows; $delay = [int]$c.settleDelayMs
+    $c = Get-Config; $c.lastMode = $name; $c.lastSwitch = [DateTime]::UtcNow.Ticks; Save-Config $c
+    $msg = "Umgeschaltet auf '$name'."
+    # Fenster dorthin zurück, wo sie in diesem Modus zuletzt waren
+    $saved = if ($remember) { Get-WindowLayout $name } else { @() }
+    if ($saved) {
+      if (-not $moved) { Start-Sleep -Milliseconds $delay }   # sonst hat Apply schon gewartet
+      $n = [MMS]::PlaceWindows([string[]]$saved); Start-Sleep -Milliseconds 1500; [void][MMS]::PlaceWindows([string[]]$saved)
+      if ($n) { $msg += " $n Fenster zurückgesetzt." }
+    }
+    if ($m.audio) {
+      # Die zuletzt in diesem Modus gewählte Ausgabe wiederherstellen, falls vorhanden. Das HDMI-Audiogerät
+      # eines gerade eingeschalteten Monitors taucht oft erst nach ein paar Sekunden auf. Fehlt es: Audio nicht anfassen.
+      $set = $null
+      for ($i = 0; $i -lt 16 -and -not $set; $i++) { try { $set = [MMSAudio]::SetDefault($m.audio) } catch {}; if (-not $set) { Start-Sleep -Milliseconds 500 } }
+      if ($set) { $msg += " Audio: $set" }
+      $c = Get-Config; $c.lastSwitch = [DateTime]::UtcNow.Ticks; Save-Config $c
+    }
+    Write-Log $msg
+    $msg
+  } finally { $lock.ReleaseMutex(); $lock.Dispose() }
 }
 
-# ---------------- autostart ----------------
-$StartupLnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Monitor Mode Switcher.lnk'
+# ---------------- Autostart ----------------
+# Wie bei den anderen Tools: HKCU\...\Run. Ältere Versionen legten eine Verknüpfung im Autostart-Ordner an.
+$RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$RunName = 'MonitorModeSwitcher'
+$OldStartupLnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Monitor Mode Switcher.lnk'
+function Test-Autostart {
+  ($null -ne (Get-ItemProperty $RunKey -Name $RunName -ErrorAction SilentlyContinue)) -or (Test-Path $OldStartupLnk)
+}
 function Set-Autostart([bool]$on) {
   if ($on) {
-    $s = (New-Object -ComObject WScript.Shell).CreateShortcut($StartupLnk)
-    $s.TargetPath = "$env:WINDIR\System32\wscript.exe"
-    $s.Arguments = '"' + (Join-Path $PSScriptRoot 'MonitorModeSwitcher.vbs') + '"'
-    $s.WorkingDirectory = $PSScriptRoot; $s.Save()
-  } elseif (Test-Path $StartupLnk) { Remove-Item $StartupLnk }
+    $cmd = '"' + "$env:WINDIR\System32\wscript.exe" + '" "' + (Join-Path $PSScriptRoot 'MonitorModeSwitcher.vbs') + '"'
+    Set-ItemProperty $RunKey $RunName $cmd
+  } else { Remove-ItemProperty $RunKey $RunName -ErrorAction SilentlyContinue }
+  if (Test-Path $OldStartupLnk) { Remove-Item $OldStartupLnk -ErrorAction SilentlyContinue }
 }
 
-# ---------------- CLI ----------------
+# ---------------- Kommandozeile ----------------
 if ($List)    { Get-Monitors | ConvertTo-Json -Depth 4; return }
 if ($Audio)   { [MMSAudio]::List() | Select-Object Name, Default | ConvertTo-Json; return }
 if ($Modes)   { (Get-Config).modes | ConvertTo-Json -Depth 6; return }
 if ($Capture) { Save-CurrentLayout $Capture; return }
-if ($Delete)  { Remove-Mode $Delete; "Deleted '$Delete'."; return }
+if ($Delete)  { Remove-Mode $Delete; "Modus '$Delete' gelöscht."; return }
 if ($Mode)    { Invoke-Mode $Mode; return }
 function Get-ToggleTarget {
-  $c = Get-Config; $t = @($c.toggleModes | Where-Object { $_ })
-  if ($t.Count -lt 2) { $t = @($c.modes | Select-Object -First 2 | ForEach-Object name) }
+  $c = Get-Config; $names = @($c.modes | ForEach-Object name)
+  $t = @($c.toggleModes | Where-Object { $_ -and ($names -contains $_) })
+  if ($t.Count -lt 2) { $t = @($names | Select-Object -First 2) }
   if ($t.Count -lt 2) { return $null }
   if ($c.lastMode -eq $t[0]) { $t[1] } else { $t[0] }
 }
 if ($Toggle) {
   $target = Get-ToggleTarget
-  if (-not $target) { 'Need at least two modes to toggle.'; return }
+  if (-not $target) { 'Zum Umschalten werden mindestens zwei Modi gebraucht.'; return }
   Invoke-Mode $target; return
 }
 
-# ---------------- UI ----------------
+# ---------------- Oberfläche ----------------
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# Icon: two monitors with a swap arrow. Drawn at any size; icon.ico is generated next to the script.
+# Symbol: zwei Monitore mit Wechselpfeil. In jeder Größe gezeichnet; icon.ico wird neben dem Skript erzeugt.
 function New-IconBitmap([int]$n) {
   $bmp = New-Object System.Drawing.Bitmap $n, $n
   $g = [System.Drawing.Graphics]::FromImage($bmp); $g.SmoothingMode = 'AntiAlias'; $k = $n / 32.0
@@ -345,29 +494,32 @@ function Save-IconFile([string]$path) {
 }
 function New-TrayIcon {
   $ico = Join-Path $PSScriptRoot 'icon.ico'
-  try { if (-not (Test-Path $ico)) { Save-IconFile $ico } } catch {}   # .ico for shortcuts; tray uses the bitmap directly
+  try { if (-not (Test-Path $ico)) { Save-IconFile $ico } } catch {}   # .ico für Verknüpfungen; das Tray nutzt die Bitmap direkt
   [System.Drawing.Icon]::FromHandle((New-IconBitmap 32).GetHicon())
 }
 
+function Show-Message([string]$text) { [void][System.Windows.Forms.MessageBox]::Show($text, $AppName) }
+
 function Show-Settings {
   $f = New-Object System.Windows.Forms.Form
-  $f.Text = "$AppName - Settings"; $f.ClientSize = New-Object System.Drawing.Size(460, 420)
+  $f.Text = "$AppName $AppVersion - Einstellungen"; $f.ClientSize = New-Object System.Drawing.Size(460, 526)
   $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.StartPosition = 'CenterScreen'
   $f.Font = New-Object System.Drawing.Font('Segoe UI', 9); $f.Icon = $script:icon
 
-  $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = 'Modes'; $lbl.SetBounds(12, 10, 200, 18); $f.Controls.Add($lbl)
+  $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = 'Modi'; $lbl.SetBounds(12, 10, 200, 18); $f.Controls.Add($lbl)
   $lb = New-Object System.Windows.Forms.ListBox; $lb.SetBounds(12, 30, 280, 160); $f.Controls.Add($lb)
   $info = New-Object System.Windows.Forms.Label; $info.SetBounds(12, 196, 286, 64); $info.ForeColor = [System.Drawing.Color]::DimGray; $f.Controls.Add($info)
 
-  # per-mode audio output
-  $la = New-Object System.Windows.Forms.Label; $la.Text = 'Audio output for this mode:'; $la.SetBounds(302, 200, 146, 18); $f.Controls.Add($la)
+  # Audio-Ausgabe pro Modus
+  $la = New-Object System.Windows.Forms.Label; $la.Text = 'Audio (gemerkt):'; $la.SetBounds(302, 200, 146, 18); $f.Controls.Add($la)
   $cbAudio = New-Object System.Windows.Forms.ComboBox; $cbAudio.DropDownStyle = 'DropDownList'; $cbAudio.SetBounds(302, 220, 146, 24)
   $cbAudio.DropDownWidth = 380; $f.Controls.Add($cbAudio)
   $script:audioLoading = $false
   $cbAudio.Add_SelectedIndexChanged({
     if ($script:audioLoading -or -not $lb.SelectedItem) { return }
     $c = Get-Config; $mm = $c.modes | Where-Object { $_.name -eq $lb.SelectedItem } | Select-Object -First 1
-    $val = if ($cbAudio.SelectedIndex -le 0) { '' } else { [string]$cbAudio.SelectedItem -replace '^\d+ - ', '' }  # "1 - " prefix can change
+    if (-not $mm) { return }
+    $val = if ($cbAudio.SelectedIndex -le 0) { '' } else { [string]$cbAudio.SelectedItem -replace '^\d+ - ', '' }  # das "1 - "-Präfix kann sich ändern
     if ($mm.PSObject.Properties.Name -contains 'audio') { $mm.audio = $val } else { $mm | Add-Member audio $val }
     Save-Config $c
   })
@@ -379,8 +531,8 @@ function Show-Settings {
   }
   $lb.Add_SelectedIndexChanged({
     $m = (Get-Config).modes | Where-Object { $_.name -eq $lb.SelectedItem } | Select-Object -First 1
-    $info.Text = if ($m) { ($m.displays | ForEach-Object { "$($_.name)  $($_.width)x$($_.height) @ $($_.x),$($_.y)$(if($_.primary){'  [primary]'})" }) -join "`n" } else { '' }
-    $script:audioLoading = $true; $cbAudio.Items.Clear(); [void]$cbAudio.Items.Add('(don''t change)')
+    $info.Text = if ($m) { ($m.displays | ForEach-Object { "$($_.name)  $($_.width)x$($_.height) @ $($_.x),$($_.y)$(if($_.primary){'  [Haupt]'})" }) -join "`n" } else { '' }
+    $script:audioLoading = $true; $cbAudio.Items.Clear(); [void]$cbAudio.Items.Add('(keine - nicht ändern)')
     $names = @(try { [MMSAudio]::List() | ForEach-Object Name } catch { })
     if ($m -and $m.audio -and -not ($names | Where-Object { $_ -like "*$($m.audio)*" })) { $names += $m.audio }
     foreach ($n in $names) { [void]$cbAudio.Items.Add($n) }
@@ -389,28 +541,34 @@ function Show-Settings {
     $script:audioLoading = $false
   })
 
-  $btn = { param($t, $y, $a) $b = New-Object System.Windows.Forms.Button; $b.Text = $t; $b.SetBounds(302, $y, 146, 28); $b.Add_Click($a); $f.Controls.Add($b) }
-  & $btn 'Switch to selected' 30 { if ($lb.SelectedItem) { [System.Windows.Forms.MessageBox]::Show((Invoke-Mode $lb.SelectedItem), $AppName) | Out-Null } }
-  & $btn 'Save current as new...' 64 {
-    $n = [Microsoft.VisualBasic.Interaction]::InputBox("Arrange your monitors in Windows display settings first.`nName for this mode:", $AppName, 'New mode')
+  # Jeder Knopf fängt seine Fehler selbst ab, damit das Fenster nicht mit einer Fehlermeldung abstürzt.
+  # Die Aktion liegt im Tag des Knopfs (keine Closure: die Aktionen brauchen $lb, $refresh usw. aus diesem Fenster).
+  $btn = { param($t, $y, $a) $b = New-Object System.Windows.Forms.Button; $b.Text = $t; $b.SetBounds(302, $y, 146, 28); $b.Tag = $a
+    $b.Add_Click({ param($s) try { & $s.Tag } catch { Write-Log "FEHLER (Einstellungen): $_"; Show-Message "Fehler: $($_.Exception.Message)" } }); $f.Controls.Add($b) }
+  & $btn 'Diesen Modus aktivieren' 30 { if ($lb.SelectedItem) { Show-Message (Invoke-Mode $lb.SelectedItem) } }
+  & $btn 'Aktuelles neu speichern...' 64 {
+    $n = [Microsoft.VisualBasic.Interaction]::InputBox("Ordne die Monitore zuerst in den Windows-Anzeigeeinstellungen an.`nName für diesen Modus:", $AppName, 'Neuer Modus')
     if ($n) { Save-CurrentLayout $n | Out-Null; & $refresh; $lb.SelectedItem = $n }
   }
-  & $btn 'Overwrite with current' 98 { if ($lb.SelectedItem) { Save-CurrentLayout $lb.SelectedItem | Out-Null; & $refresh } }
-  & $btn 'Rename...' 132 {
+  & $btn 'Mit aktuellem überschreiben' 98 { if ($lb.SelectedItem) { Save-CurrentLayout $lb.SelectedItem | Out-Null; & $refresh } }
+  & $btn 'Umbenennen...' 132 {
     if (-not $lb.SelectedItem) { return }
-    $n = [Microsoft.VisualBasic.Interaction]::InputBox('New name:', $AppName, $lb.SelectedItem)
-    if ($n) { $c = Get-Config; $old = $lb.SelectedItem; ($c.modes | Where-Object { $_.name -eq $old }).name = $n
-      foreach ($k in 'lastMode', 'startupMode', 'controllerMode') { if ($c.$k -eq $old) { $c.$k = $n } }
-      Save-Config $c; & $refresh; $lb.SelectedItem = $n }
+    $old = [string]$lb.SelectedItem
+    $n = [Microsoft.VisualBasic.Interaction]::InputBox('Neuer Name:', $AppName, $old)
+    if ($n -and $n -ne $old) { $e = Rename-Mode $old $n; if ($e) { Show-Message $e } else { & $refresh; $lb.SelectedItem = $n } }
   }
-  & $btn 'Delete' 166 { if ($lb.SelectedItem) { Remove-Mode $lb.SelectedItem; & $refresh } }
+  & $btn 'Löschen' 166 {
+    if (-not $lb.SelectedItem) { return }
+    $ans = [System.Windows.Forms.MessageBox]::Show("Modus '$($lb.SelectedItem)' löschen?", $AppName, 'YesNo', 'Question')
+    if ($ans -eq 'Yes') { Remove-Mode $lb.SelectedItem; & $refresh }
+  }
 
   $c = Get-Config
-  $cbMove = New-Object System.Windows.Forms.CheckBox; $cbMove.Text = 'Move windows to the new monitors when switching'
+  $cbMove = New-Object System.Windows.Forms.CheckBox; $cbMove.Text = 'Fenster beim Umschalten auf die neuen Monitore mitnehmen'
   $cbMove.SetBounds(12, 266, 436, 22); $cbMove.Checked = [bool]$c.moveWindows; $f.Controls.Add($cbMove)
-  $cbAuto = New-Object System.Windows.Forms.CheckBox; $cbAuto.Text = 'Start with Windows'
-  $cbAuto.SetBounds(12, 292, 436, 22); $cbAuto.Checked = (Test-Path $StartupLnk); $f.Controls.Add($cbAuto)
-  $l2 = New-Object System.Windows.Forms.Label; $l2.Text = 'Wait after switching before moving windows (ms):'; $l2.SetBounds(12, 322, 300, 20); $f.Controls.Add($l2)
+  $cbAuto = New-Object System.Windows.Forms.CheckBox; $cbAuto.Text = 'Mit Windows starten'
+  $cbAuto.SetBounds(12, 292, 436, 22); $cbAuto.Checked = (Test-Autostart); $f.Controls.Add($cbAuto)
+  $l2 = New-Object System.Windows.Forms.Label; $l2.Text = 'Wartezeit nach dem Umschalten, bevor Fenster wandern (ms):'; $l2.SetBounds(12, 322, 300, 20); $f.Controls.Add($l2)
   $nd = New-Object System.Windows.Forms.NumericUpDown; $nd.SetBounds(312, 320, 80, 22); $nd.Minimum = 500; $nd.Maximum = 15000; $nd.Increment = 500
   $nd.Value = [Math]::Min(15000, [Math]::Max(500, [int]$c.settleDelayMs)); $f.Controls.Add($nd)
 
@@ -419,35 +577,38 @@ function Show-Settings {
     foreach ($n in $modeNames) { [void]$cb.Items.Add($n) }; if ($sel -and $cb.Items.Contains($sel)) { $cb.SelectedItem = $sel } elseif ($cb.Items.Count) { $cb.SelectedIndex = 0 }
     $f.Controls.Add($cb); $cb }
 
-  $l3 = New-Object System.Windows.Forms.Label; $l3.Text = 'On start (after boot):'; $l3.SetBounds(12, 356, 140, 20); $f.Controls.Add($l3)
+  $l3 = New-Object System.Windows.Forms.Label; $l3.Text = 'Beim Start (nach dem Booten):'; $l3.SetBounds(12, 356, 140, 20); $f.Controls.Add($l3)
   $cbStart = New-Object System.Windows.Forms.ComboBox; $cbStart.DropDownStyle = 'DropDownList'; $cbStart.SetBounds(152, 352, 150, 24)
-  [void]$cbStart.Items.AddRange(@('Do nothing', 'Restore last mode', 'Always use:')); $f.Controls.Add($cbStart)
+  [void]$cbStart.Items.AddRange(@('Nichts tun', 'Letzten Modus herstellen', 'Immer diesen:')); $f.Controls.Add($cbStart)
   $cbStart.SelectedIndex = switch ($c.startupAction) { 'none' { 0 } 'mode' { 2 } default { 1 } }
   $cbStartMode = & $newCombo 308 352 140 $c.startupMode
   $cbStartMode.Enabled = ($cbStart.SelectedIndex -eq 2); $cbStart.Add_SelectedIndexChanged({ $cbStartMode.Enabled = ($cbStart.SelectedIndex -eq 2) })
 
-  $cbPad = New-Object System.Windows.Forms.CheckBox; $cbPad.Text = 'When an Xbox controller connects, ask to switch to:'
+  $cbPad = New-Object System.Windows.Forms.CheckBox; $cbPad.Text = 'Wenn ein Xbox-Controller verbunden wird, fragen nach:'
   $cbPad.SetBounds(12, 388, 300, 22); $cbPad.Checked = [bool]$c.controllerPrompt; $f.Controls.Add($cbPad)
   $cbPadMode = & $newCombo 308 386 140 $c.controllerMode
-  $cbVA = New-Object System.Windows.Forms.CheckBox; $cbVA.Text = 'Controller: hold View + double-tap A to switch to:'
+  $cbVA = New-Object System.Windows.Forms.CheckBox; $cbVA.Text = 'Controller: Ansicht halten + 2x A schaltet auf:'
   $cbVA.SetBounds(12, 414, 296, 22); $cbVA.Checked = [bool]$c.controllerViewA; $f.Controls.Add($cbVA)
   $cbVAMode = & $newCombo 308 412 140 $c.controllerViewA
-  $cbVB = New-Object System.Windows.Forms.CheckBox; $cbVB.Text = 'Controller: hold View + double-tap B to switch to:'
+  $cbVB = New-Object System.Windows.Forms.CheckBox; $cbVB.Text = 'Controller: Ansicht halten + 2x B schaltet auf:'
   $cbVB.SetBounds(12, 440, 296, 22); $cbVB.Checked = [bool]$c.controllerViewB; $f.Controls.Add($cbVB)
   $cbVBMode = & $newCombo 308 438 140 $c.controllerViewB
 
-  $open = New-Object System.Windows.Forms.LinkLabel; $open.Text = 'Open config.json'; $open.SetBounds(12, 490, 200, 20)
+  $open = New-Object System.Windows.Forms.LinkLabel; $open.Text = 'config.json öffnen'; $open.SetBounds(12, 476, 200, 20)
   $open.Add_Click({ if (-not (Test-Path $CfgPath)) { Save-Config (Get-Config) }; Start-Process notepad.exe $CfgPath }); $f.Controls.Add($open)
-  $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Save && Close'; $ok.SetBounds(332, 484, 116, 30); $f.Controls.Add($ok)
-  $f.ClientSize = New-Object System.Drawing.Size(460, 526)
+  $openLog = New-Object System.Windows.Forms.LinkLabel; $openLog.Text = 'Diagnose-Log öffnen'; $openLog.SetBounds(12, 498, 200, 20)
+  $openLog.Add_Click({ if (-not (Test-Path $LogPath)) { Write-Log 'Log angelegt' }; Start-Process notepad.exe $LogPath }); $f.Controls.Add($openLog)
+  $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Speichern && Schließen'; $ok.SetBounds(312, 484, 136, 30); $f.Controls.Add($ok)
   $ok.Add_Click({
-    $c = Get-Config; $c.moveWindows = $cbMove.Checked; $c.settleDelayMs = [int]$nd.Value
-    $c.startupAction = @('none', 'last', 'mode')[$cbStart.SelectedIndex]; $c.startupMode = [string]$cbStartMode.SelectedItem
-    $c.controllerPrompt = $cbPad.Checked; $c.controllerMode = [string]$cbPadMode.SelectedItem
-    $c.controllerViewA = if ($cbVA.Checked) { [string]$cbVAMode.SelectedItem } else { '' }
-    $c.controllerViewB = if ($cbVB.Checked) { [string]$cbVBMode.SelectedItem } else { '' }
-    Save-Config $c
-    Set-Autostart $cbAuto.Checked; $f.Close()
+    try {
+      $c = Get-Config; $c.moveWindows = $cbMove.Checked; $c.settleDelayMs = [int]$nd.Value
+      $c.startupAction = @('none', 'last', 'mode')[$cbStart.SelectedIndex]; $c.startupMode = [string]$cbStartMode.SelectedItem
+      $c.controllerPrompt = $cbPad.Checked; $c.controllerMode = [string]$cbPadMode.SelectedItem
+      $c.controllerViewA = if ($cbVA.Checked) { [string]$cbVAMode.SelectedItem } else { '' }
+      $c.controllerViewB = if ($cbVB.Checked) { [string]$cbVBMode.SelectedItem } else { '' }
+      Save-Config $c
+      Set-Autostart $cbAuto.Checked; $f.Close()
+    } catch { Write-Log "FEHLER (Einstellungen speichern): $_"; Show-Message "Fehler beim Speichern: $($_.Exception.Message)" }
   })
   $f.AcceptButton = $ok
   & $refresh
@@ -468,12 +629,19 @@ public class MMSHotkey : NativeWindow {
 $script:icon = New-TrayIcon
 if ($Settings) { Show-Settings; return }
 
-# single instance
+# nur eine Tray-Instanz
 $created = $false
 $mutex = New-Object System.Threading.Mutex($true, 'Local\MonitorModeSwitcherTray', [ref]$created)
-if (-not $created) { [System.Windows.Forms.MessageBox]::Show("$AppName is already running in the tray.", $AppName) | Out-Null; return }
+if (-not $created) { Show-Message "$AppName läuft bereits (Symbol im Infobereich)."; return }
 
-# ---- controller-friendly mode picker (mouse, keyboard or Xbox controller) ----
+try { $cfg0 = Get-Config }
+catch { Show-Message "$($_.Exception.Message)`n`nBitte config.json reparieren (Einstellungen > config.json öffnen)."; return }
+Write-Log "$AppName $AppVersion gestartet"
+
+# Ältere Versionen: Autostart-Verknüpfung -> Registry (wie die anderen Tools)
+if (Test-Path $OldStartupLnk) { try { Set-Autostart $true; Write-Log 'Autostart auf HKCU\...\Run umgestellt' } catch { Write-Log "Autostart umstellen: $_" } }
+
+# ---- Controller-taugliche Modusauswahl (Maus, Tastatur oder Xbox-Controller) ----
 function Show-ModePicker([string]$title, [string]$preselect) {
   $modes = @((Get-Config).modes | ForEach-Object name)
   if (-not $modes) { return $null }
@@ -483,9 +651,9 @@ function Show-ModePicker([string]$title, [string]$preselect) {
   $rowH = 64; $f.ClientSize = New-Object System.Drawing.Size(520, (110 + ($modes.Count + 1) * ($rowH + 8)))
   $t = New-Object System.Windows.Forms.Label; $t.Text = $title; $t.ForeColor = [System.Drawing.Color]::White
   $t.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold); $t.SetBounds(24, 18, 472, 40); $f.Controls.Add($t)
-  $h = New-Object System.Windows.Forms.Label; $h.Text = 'Controller: up/down + A to confirm, B to cancel'
+  $h = New-Object System.Windows.Forms.Label; $h.Text = 'Controller: hoch/runter + A bestätigt, B bricht ab'
   $h.ForeColor = [System.Drawing.Color]::Gray; $h.Font = New-Object System.Drawing.Font('Segoe UI', 10); $h.SetBounds(24, 58, 472, 24); $f.Controls.Add($h)
-  $items = @($modes) + 'Cancel'
+  $items = @($modes) + 'Abbrechen'
   $btns = @()
   for ($i = 0; $i -lt $items.Count; $i++) {
     $b = New-Object System.Windows.Forms.Label; $b.Text = $items[$i]; $b.TextAlign = 'MiddleCenter'
@@ -517,48 +685,60 @@ function Show-ModePicker([string]$title, [string]$preselect) {
 
 $ni = New-Object System.Windows.Forms.NotifyIcon
 $ni.Icon = $script:icon; $ni.Text = $AppName; $ni.Visible = $true
+$script:busy = $false
+
+# Umschalten aus der Tray-App: nie doppelt, Fehler als Hinweis statt Absturz
+function Switch-WithTip([string]$m) {
+  if ($script:busy) { return }
+  $script:busy = $true
+  try { $ni.ShowBalloonTip(2500, $AppName, (Invoke-Mode $m), 'Info') }
+  catch { Write-Log "FEHLER (Umschalten auf '$m'): $_"; $ni.ShowBalloonTip(4000, $AppName, "Fehler: $($_.Exception.Message)", 'Error') }
+  finally { $script:busy = $false }
+}
+
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $menu.Add_Opening({
   $menu.Items.Clear()
+  $title = $menu.Items.Add("$AppName $AppVersion"); $title.Enabled = $false
+  [void]$menu.Items.Add('-')
   $cfgM = Get-Config; $modes = $cfgM.modes
-  if (-not $modes) { $i = $menu.Items.Add('(no modes yet - open Settings)'); $i.Enabled = $false }
+  if (-not $modes) { $i = $menu.Items.Add('(noch keine Modi - Einstellungen öffnen)'); $i.Enabled = $false }
   foreach ($m in $modes) {
     $it = $menu.Items.Add($m.name); $it.Tag = $m.name; $it.Checked = ($m.name -eq $cfgM.lastMode)
-    $it.Add_Click({ param($s) $r = Invoke-Mode $s.Tag; $ni.ShowBalloonTip(2500, $AppName, $r, 'Info') })
+    $it.Add_Click({ param($s) Switch-WithTip $s.Tag })
   }
   [void]$menu.Items.Add('-')
-  [void]$menu.Items.Add('Settings...', $null, { Show-Settings })
-  [void]$menu.Items.Add('Exit', $null, { $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() })
+  [void]$menu.Items.Add('Einstellungen...', $null, { try { Show-Settings } catch { Write-Log "FEHLER (Einstellungen): $_" } })
+  [void]$menu.Items.Add('Diagnose-Log öffnen', $null, { if (-not (Test-Path $LogPath)) { Write-Log 'Log angelegt' }; Start-Process notepad.exe $LogPath })
+  [void]$menu.Items.Add('Beenden', $null, { $ni.Visible = $false; [System.Windows.Forms.Application]::Exit() })
   $_.Cancel = $false
 })
-[void]$menu.Items.Add('...')   # placeholder so Opening fires
+[void]$menu.Items.Add('...')   # Platzhalter, damit Opening ausgelöst wird
 $ni.ContextMenuStrip = $menu
 $ni.Add_MouseClick({ param($s, $e)
   if ($e.Button -eq 'Left') { $mi = [System.Windows.Forms.NotifyIcon].GetMethod('ShowContextMenu', [Reflection.BindingFlags]'Instance,NonPublic'); $mi.Invoke($ni, $null) }
 })
-function Switch-WithTip([string]$m) { $ni.ShowBalloonTip(2500, $AppName, (Invoke-Mode $m), 'Info') }
 
-$cfg0 = Get-Config
-if (-not $cfg0.modes) { $ni.ShowBalloonTip(4000, $AppName, 'No modes yet. Right-click the tray icon > Settings to save your first layout.', 'Info') }
+if (-not $cfg0.modes) { $ni.ShowBalloonTip(4000, $AppName, 'Noch keine Modi. Rechtsklick aufs Symbol > Einstellungen, um das erste Layout zu speichern.', 'Info') }
 
-# Startup: restore last mode or a fixed default mode
+# Beim Start: letzten Modus oder einen festen Modus herstellen
 $startMode = switch ($cfg0.startupAction) { 'last' { $cfg0.lastMode } 'mode' { $cfg0.startupMode } default { '' } }
 if ($startMode -and ($cfg0.modes | Where-Object { $_.name -eq $startMode })) {
   $st = New-Object System.Windows.Forms.Timer; $st.Interval = 2000
   $st.Add_Tick({ $st.Stop(); Switch-WithTip $startMode }); $st.Start()
 }
 
-# Global toggle hotkey (default Ctrl+#)
+# Globales Tastenkürzel zum Umschalten (Standard Strg+#)
 function Get-HotkeyParts([string]$s) {
   $mod = 0; $vk = 0
   foreach ($part in ($s -split '\+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
     switch -regex ($part) {
       '^(ctrl|strg|control)$' { $mod = $mod -bor 2; continue }
       '^alt$' { $mod = $mod -bor 1; continue }
-      '^shift$' { $mod = $mod -bor 4; continue }
+      '^(shift|umschalt)$' { $mod = $mod -bor 4; continue }
       '^win$' { $mod = $mod -bor 8; continue }
       default {
-        if ($part -eq '#') { $vk = 0xBF }   # '#' key on German layout (VK_OEM_2)
+        if ($part -eq '#') { $vk = 0xBF }   # '#'-Taste auf deutscher Tastatur (VK_OEM_2)
         else { try { $vk = [int][System.Windows.Forms.Keys]$part } catch { $vk = 0 } }
       }
     }
@@ -570,45 +750,79 @@ if ($hk[1]) {
   $script:hotkey = New-Object MMSHotkey
   if ($script:hotkey.Register($hk[0], $hk[1])) {
     $script:hotkey.add_Pressed({
-      if ($script:busy) { return }
-      $tg = Get-ToggleTarget
-      if ($tg) { $script:busy = $true; Switch-WithTip $tg; $script:busy = $false }
+      try { $tg = Get-ToggleTarget; if ($tg) { Switch-WithTip $tg } } catch { Write-Log "FEHLER (Tastenkürzel): $_" }
     })
-  } else { $ni.ShowBalloonTip(4000, $AppName, "Hotkey $($cfg0.toggleHotkey) is already used by another program.", 'Warning') }
+  } else {
+    Write-Log "Tastenkürzel $($cfg0.toggleHotkey) ist schon belegt"
+    $ni.ShowBalloonTip(4000, $AppName, "Tastenkürzel $($cfg0.toggleHotkey) wird schon von einem anderen Programm benutzt.", 'Warning')
+  }
 }
 
-# Controller watcher: optional prompt on connect; hold View + double-tap A / B switches mode
-$script:padWas = ([MMS]::Pad() -ge 0); $script:padPrev = 0; $script:busy = $false
+# Controller-Wächter: optional Abfrage beim Verbinden; Ansicht halten + 2x A / B schaltet um
+$script:padWas = ([MMS]::Pad() -ge 0); $script:padPrev = 0
 $script:tapA = [DateTime]::MinValue; $script:tapB = [DateTime]::MinValue
+$script:tickErr = $false
 $pt = New-Object System.Windows.Forms.Timer; $pt.Interval = 50
 $pt.Add_Tick({
   if ($script:busy) { return }
-  $p = [MMS]::Pad(); $c = Get-Config; $choice = $null; $ask = $false; $title = ''
-  if ($p -ge 0 -and -not $script:padWas -and $c.controllerPrompt -and $c.controllerMode -and $c.lastMode -ne $c.controllerMode) {
-    $ask = $true; $title = 'Controller connected - switch mode?'
-  }
-  $now = [DateTime]::Now; $target = $null
-  if ($p -ge 0 -and ($p -band 0x20)) {   # View held
-    $new = $p -band (-bnot $script:padPrev)
-    if ($new -band 0x1000) {
-      if (($now - $script:tapA).TotalMilliseconds -le 500) { $target = $c.controllerViewA; $script:tapA = [DateTime]::MinValue } else { $script:tapA = $now }
+  try {
+    $p = [MMS]::Pad(); $c = Get-Config; $choice = $null; $ask = $false; $title = ''
+    if ($p -ge 0 -and -not $script:padWas -and $c.controllerPrompt -and $c.controllerMode -and $c.lastMode -ne $c.controllerMode) {
+      $ask = $true; $title = 'Controller verbunden - Modus wechseln?'
     }
-    if ($new -band 0x2000) {
-      if (($now - $script:tapB).TotalMilliseconds -le 500) { $target = $c.controllerViewB; $script:tapB = [DateTime]::MinValue } else { $script:tapB = $now }
+    $now = [DateTime]::Now; $target = $null
+    if ($p -ge 0 -and ($p -band 0x20)) {   # Ansicht gehalten
+      $new = $p -band (-bnot $script:padPrev)
+      if ($new -band 0x1000) {
+        if (($now - $script:tapA).TotalMilliseconds -le 500) { $target = $c.controllerViewA; $script:tapA = [DateTime]::MinValue } else { $script:tapA = $now }
+      }
+      if ($new -band 0x2000) {
+        if (($now - $script:tapB).TotalMilliseconds -le 500) { $target = $c.controllerViewB; $script:tapB = [DateTime]::MinValue } else { $script:tapB = $now }
+      }
+    } else { $script:tapA = [DateTime]::MinValue; $script:tapB = [DateTime]::MinValue }
+    $script:padWas = ($p -ge 0); $script:padPrev = [Math]::Max(0, $p)
+    if ($target) { Switch-WithTip $target; return }
+    if ($ask) {
+      $script:busy = $true
+      try {
+        $pre = if ($c.controllerMode) { $c.controllerMode } else { $c.lastMode }
+        $choice = Show-ModePicker $title $pre
+        $script:padPrev = [Math]::Max(0, [MMS]::Pad())
+      } finally { $script:busy = $false }
+      if ($choice) { Switch-WithTip $choice }
     }
-  } else { $script:tapA = [DateTime]::MinValue; $script:tapB = [DateTime]::MinValue }
-  $script:padWas = ($p -ge 0); $script:padPrev = [Math]::Max(0, $p)
-  if ($target) { $script:busy = $true; Switch-WithTip $target; $script:busy = $false; return }
-  if ($ask) {
-    $script:busy = $true
-    $pre = if ($c.controllerMode) { $c.controllerMode } else { $c.lastMode }
-    $choice = Show-ModePicker $title $pre
-    $script:padPrev = [Math]::Max(0, [MMS]::Pad())
-    if ($choice) { Switch-WithTip $choice }
-    $script:busy = $false
+    $script:tickErr = $false
+  } catch {
+    if (-not $script:tickErr) { Write-Log "FEHLER (Controller): $_" }   # nur einmal loggen, der Timer läuft 20x pro Sekunde
+    $script:tickErr = $true
   }
 })
 $pt.Start()
+
+# Audio-Wächter: wählt der Nutzer eine andere Standardausgabe, wird sie für den aktuellen Modus gemerkt.
+# Ignoriert: Wechsel innerhalb von 20 s nach einem Umschalten, und Wechsel, weil das alte Gerät verschwunden ist
+# (Monitor aus / abgesteckt) - das ist Windows' Rückfall, keine Wahl.
+function Get-AudioState { $l = @(try { [MMSAudio]::List() } catch { }); @{ ids = @($l | ForEach-Object Id); def = ($l | Where-Object Default | Select-Object -First 1) } }
+$script:aud = Get-AudioState
+$at = New-Object System.Windows.Forms.Timer; $at.Interval = 2000
+$at.Add_Tick({
+  if ($script:busy) { return }
+  try {
+    $now = Get-AudioState; $prev = $script:aud; $script:aud = $now
+    if (-not $now.def -or -not $prev.def -or $now.def.Id -eq $prev.def.Id) { return }
+    if ($now.ids -notcontains $prev.def.Id) { return }                       # altes Gerät verschwunden
+    $c = Get-Config
+    if (([DateTime]::UtcNow.Ticks - [long]$c.lastSwitch) -lt 20 * 10000000L) { return }
+    $m = $c.modes | Where-Object { $_.name -eq $c.lastMode } | Select-Object -First 1
+    if (-not $m -or -not $now.def.Name) { return }
+    $val = $now.def.Name -replace '^\d+ - ', ''   # das "1 - "-Präfix kann sich ändern
+    if ($m.audio -eq $val) { return }
+    if ($m.PSObject.Properties.Name -contains 'audio') { $m.audio = $val } else { $m | Add-Member audio $val }
+    Save-Config $c
+    Write-Log "Audio für Modus '$($m.name)' gemerkt: $val"
+  } catch { Write-Log "FEHLER (Audio): $_" }
+})
+$at.Start()
 
 [System.Windows.Forms.Application]::Run()
 $ni.Dispose(); $mutex.ReleaseMutex()

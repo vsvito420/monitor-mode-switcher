@@ -1,75 +1,90 @@
-# Setup guide for AI agents
+# Einrichtungsanleitung für KI-Agenten
 
-You are configuring **Monitor Mode Switcher** for the user. Everything lives in `config.json`
-next to `MonitorModeSwitcher.ps1`. Run commands with Windows PowerShell 5.1 from this folder.
+Du richtest den **Monitor Mode Switcher** für den Nutzer ein. Alles steht in `config.json` neben
+`MonitorModeSwitcher.ps1`. Befehle mit Windows PowerShell 5.1 aus diesem Ordner ausführen.
+Der Nutzer spricht Deutsch – antworte auf Deutsch.
 
-## 1. Discover monitors
+## 1. Monitore ermitteln
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\MonitorModeSwitcher.ps1 -List
 ```
 
-Returns every connected monitor (also ones that are currently off):
-`id` (EDID model code — this is what modes reference), `name`, `active`, `primary`,
-`x`, `y`, `width`, `height`, `refresh` (only filled for active monitors).
+Liefert jeden angeschlossenen Monitor (auch ausgeschaltete):
+`id` (EDID-Modellcode – darauf verweisen die Modi), `name`, `active`, `primary`,
+`x`, `y`, `width`, `height`, `refresh` (nur bei aktiven Monitoren gefüllt).
 
-Match the user's words ("the 1440p one", "the Lenovo", "the 165 Hz monitor") to `id`s using
-`name` and resolution. If it's ambiguous, ask the user.
+Ordne die Worte des Nutzers („der 1440p“, „der Lenovo“, „der 165-Hz-Monitor“) über `name` und Auflösung den `id`s zu.
+Ist es nicht eindeutig, frag nach.
 
-## 2. Write modes into `config.json`
+## 2. Modi in `config.json` schreiben
 
 ```json
 {
   "moveWindows": true,
   "settleDelayMs": 3000,
   "modes": [
-    { "name": "Desk", "displays": [
+    { "name": "Schreibtisch", "displays": [
       { "id": "ACR0915", "name": "Acer 1440p", "primary": true,  "x": 0,    "y": 0,   "width": 2560, "height": 1440, "refresh": 0 },
       { "id": "LEN111C", "name": "Lenovo",     "primary": false, "x": 2560, "y": 360, "width": 1920, "height": 1080, "refresh": 0 } ] }
   ]
 }
 ```
 
-Rules:
-- Each mode lists the monitors that should be **on**. Every other monitor is turned **off**.
-- Exactly one display per mode has `"primary": true`, at `x: 0, y: 0`.
-- Coordinates are physical pixels in one virtual desktop. Put a monitor
-  - **right** of the primary: `x = primaryWidth`
-  - **left** of the primary: `x = -itsWidth`
-  - bottom-aligned: `y = primaryHeight - itsHeight`; top-aligned: `y = 0`
-- Monitors must touch edge to edge (no gaps, no overlaps).
-- `width`/`height` must be a resolution the monitor supports; use its native resolution unless told otherwise.
-- `refresh: 0` = highest refresh rate available at that resolution (recommended).
-- Optional `"audio"` on a mode: part of the output device name to make default when switching
-  (list them with `.\MonitorModeSwitcher.ps1 -Audio`; drop a leading `"1 - "` number, it can change).
-  Empty or missing = don't touch audio.
-- Keep existing modes unless the user asks to remove them. Write the file as UTF-8.
+Regeln:
+- Jeder Modus listet die Monitore, die **an** sein sollen. Alle anderen werden **ausgeschaltet**.
+- Genau ein Monitor pro Modus hat `"primary": true`, bei `x: 0, y: 0`.
+- Koordinaten sind physische Pixel in einem gemeinsamen virtuellen Desktop. Einen Monitor
+  - **rechts** vom Hauptmonitor: `x = Breite des Hauptmonitors`
+  - **links** vom Hauptmonitor: `x = -seine Breite`
+  - unten bündig: `y = Höhe Hauptmonitor - seine Höhe`; oben bündig: `y = 0`
+- Monitore müssen Kante an Kante liegen (keine Lücken, keine Überlappung).
+- `width`/`height` muss eine Auflösung sein, die der Monitor kann; ohne andere Angabe die native Auflösung.
+- `refresh: 0` = höchste Bildwiederholrate bei dieser Auflösung (empfohlen).
+- `"audio"` an einem Modus wird automatisch gelernt: Solange die Tray-App läuft, merkt sich der aktuelle Modus die in
+  Windows gewählte Ausgabe und stellt sie beim nächsten Wechsel dorthin wieder her, falls vorhanden.
+  Vorbelegen geht auch (Teil des Gerätenamens aus `.\MonitorModeSwitcher.ps1 -Audio`; eine führende Nummer wie
+  `"1 - "` weglassen, die kann sich ändern). Leer oder fehlend = Audio nicht anfassen.
+- Bestehende Modi behalten, außer der Nutzer will sie entfernt haben. Datei als UTF-8 schreiben.
+- Die Schlüssel in `config.json` bleiben englisch (Kompatibilität); nur die Oberfläche ist deutsch.
 
-Alternative: if the user has already arranged a layout in Windows, save it with
-`.\MonitorModeSwitcher.ps1 -Capture "Name"`.
+Alternative: Hat der Nutzer ein Layout schon in Windows angeordnet, mit
+`.\MonitorModeSwitcher.ps1 -Capture "Name"` speichern.
 
-## 3. Optional settings
+## 3. Optionale Einstellungen
 
-- Autostart: create a shortcut in `shell:startup` (`[Environment]::GetFolderPath('Startup')`)
-  named `Monitor Mode Switcher.lnk`, target `wscript.exe`, argument `"<full path>\MonitorModeSwitcher.vbs"`.
-- `moveWindows` (bool), `settleDelayMs` (500–15000, raise it if windows land wrong).
-- `startupAction`: `"last"` (restore `lastMode`, default), `"mode"` (always `startupMode`), `"none"`.
-- `controllerPrompt` (bool) + `controllerMode` (mode name): when an Xbox/XInput controller connects
-  and the current mode isn't `controllerMode`, show a controller-navigable prompt.
-- `controllerViewA` / `controllerViewB` (mode name or `""`): hold View and double-tap A / B to switch
-  straight to that mode (doesn't clash with Steam Big Picture / Xbox overlays).
-- `toggleModes` (array of two mode names): what `-Toggle` / `Toggle.vbs` switches between.
-  Empty = the first two modes.
-- `toggleHotkey` (e.g. `"Ctrl+#"`, `"Ctrl+Alt+F9"`, `""` = off): global keyboard shortcut for the toggle
-  while the tray app runs.
-- `lastMode` is written by the app on every switch; don't edit it.
+- Autostart: Registry-Wert `MonitorModeSwitcher` unter `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` mit
+  `"C:\Windows\System32\wscript.exe" "<voller Pfad>\MonitorModeSwitcher.vbs"` (wie die anderen Tools in `C:\Tools`).
+  Am einfachsten: Einstellungen → „Mit Windows starten“. Eine alte Verknüpfung `Monitor Mode Switcher.lnk` im
+  Autostart-Ordner wird beim Tray-Start automatisch umgestellt.
+- `rememberWindows` (bool, Standard an): Vor jedem Wechsel merkt sich die App die genaue Position jedes Fensters im
+  bisherigen Modus (`%APPDATA%\MonitorModeSwitcher\windows.json`) und setzt die Fenster beim Zurückwechseln in diesen
+  Modus wieder dorthin. Gilt bis zur Abmeldung (Fenster-Handles); neue Fenster behandelt `moveWindows`.
+- `moveWindows` (bool), `settleDelayMs` (500–15000, erhöhen, wenn Fenster falsch landen).
+- `startupAction`: `"last"` (`lastMode` herstellen, Standard), `"mode"` (immer `startupMode`), `"none"`.
+- `controllerPrompt` (bool) + `controllerMode` (Modusname): Verbindet sich ein Xbox/XInput-Controller und der aktuelle
+  Modus ist nicht `controllerMode`, erscheint eine mit dem Controller bedienbare Abfrage.
+- `controllerViewA` / `controllerViewB` (Modusname oder `""`): Ansicht halten und 2x A / B tippen schaltet direkt auf
+  diesen Modus (kollidiert nicht mit Steam Big Picture / Xbox-Overlay).
+- `toggleModes` (Array mit zwei Modusnamen): zwischen diesen wechselt `-Toggle` / `Toggle.vbs`. Leer = die ersten zwei Modi.
+- `toggleHotkey` (z. B. `"Ctrl+#"`, `"Ctrl+Alt+F9"`, `""` = aus): globales Tastenkürzel zum Umschalten, solange die Tray-App läuft.
+- `lastMode` und `lastSwitch` schreibt die App bei jedem Umschalten selbst; nicht bearbeiten.
+- Beim Umbenennen/Löschen eines Modus passt die App alle Verweise (`startupMode`, `controller*`, `toggleModes`) mit an.
 
-## 4. Verify
+## 4. Prüfen
 
 ```powershell
 .\MonitorModeSwitcher.ps1 -Modes
 ```
 
-Switching (`-Mode "Name"`) turns screens off/on — **ask the user before testing it**, and switch
-back to their preferred mode afterwards. Then start the tray app: double-click / run
-`MonitorModeSwitcher.vbs`.
+Umschalten (`-Mode "Name"`) schaltet Bildschirme aus/an – **vor dem Testen den Nutzer fragen** und danach auf seinen
+bevorzugten Modus zurückschalten. Dann die Tray-App starten: `MonitorModeSwitcher.vbs` doppelklicken / ausführen.
+Fehler und Umschaltungen stehen in `%APPDATA%\MonitorModeSwitcher\log.txt`.
+
+## Für Änderungen am Code
+
+- Eine Datei: `MonitorModeSwitcher.ps1` (PowerShell 5.1 + eingebettetes C# über `Add-Type`, C# 5).
+- Die Datei ist **UTF-8 mit BOM** gespeichert, sonst liest PowerShell 5.1 die Umlaute falsch. Beim Bearbeiten beibehalten.
+- `config.json` wird über eine Temp-Datei ersetzt (`Save-Config`), weil Tray, `Toggle.vbs` und CLI gleichzeitig
+  lesen/schreiben können. Umschaltungen sind über den Mutex `Local\MonitorModeSwitcherSwitch` gegeneinander gesperrt.
+- Gemeinsame Regeln für alle Tools: [`..\KONVENTIONEN.md`](../KONVENTIONEN.md).
