@@ -56,6 +56,7 @@ public static class MMS {
   [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h,IntPtr a,int x,int y,int w,int hh,uint f);
   [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h,int c);
   [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr v);
+  [DllImport("user32.dll")] static extern int SetDisplayConfig(uint np,IntPtr p,uint nm,IntPtr m,uint f);
   [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h,int a,out int v,int s);
 
   public static void InitDpi(){ try{ SetProcessDpiAwarenessContext(new IntPtr(-4)); }catch{} }
@@ -164,15 +165,23 @@ public static class MMS {
     var before=List(); var devToId=new Dictionary<string,string>();
     string oldPrim=null; var wasActive=new HashSet<string>();
     foreach(var d in before) if(d.Active){ devToId[d.Dev]=d.Id; wasActive.Add(d.Id); if(d.Primary) oldPrim=d.Id; }
+    var wins=move?Snapshot(devToId):null; int r=0;
+    // Bei ausgeschalteten Anschlüssen meldet Windows oft einen veralteten Monitor. Darum nur aktive zuordnen;
+    // fehlt einer, erst alle angeschlossenen Monitore einschalten ("Erweitern") und neu einlesen.
+    var cur=before; bool missing=false;
+    foreach(var id in ids) if(!cur.Exists(z=>z.Active&&z.Id.Equals(id,StringComparison.OrdinalIgnoreCase))) missing=true;
+    if(missing){
+      SetDisplayConfig(0,IntPtr.Zero,0,IntPtr.Zero,0x80|0x04);  // SDC_APPLY | SDC_TOPOLOGY_EXTEND
+      for(int t=0;t<10;t++){ Thread.Sleep(500); cur=List(); missing=false;
+        foreach(var id in ids) if(!cur.Exists(z=>z.Active&&z.Id.Equals(id,StringComparison.OrdinalIgnoreCase))) missing=true;
+        if(!missing) break; } }
     var used=new HashSet<string>(); var devs=new string[ids.Length];
-    // Erst prüfen, ob alle Monitore da sind - dann erst etwas ändern
     for(int i=0;i<ids.Length;i++){
-      var d=before.Find(z=>z.Id.Equals(ids[i],StringComparison.OrdinalIgnoreCase)&&!used.Contains(z.Dev));
+      var d=cur.Find(z=>z.Active&&z.Id.Equals(ids[i],StringComparison.OrdinalIgnoreCase)&&!used.Contains(z.Dev));
       if(d==null) return "Monitor nicht angeschlossen: "+ids[i];
       used.Add(d.Dev); devs[i]=d.Dev; }
-    var wins=move?Snapshot(devToId):null; int r=0;
     for(int i=0;i<ids.Length;i++) r|=Set(devs[i],x[i],y[i],w[i],h[i],hz[i],prim[i]);
-    foreach(var d in before) if(d.Active&&!used.Contains(d.Dev)) r|=Set(d.Dev,0,0,0,0,0,false);
+    foreach(var d in cur) if(d.Active&&!used.Contains(d.Dev)) r|=Set(d.Dev,0,0,0,0,0,false);
     int c=ChangeDisplaySettingsEx(null,IntPtr.Zero,IntPtr.Zero,0,IntPtr.Zero);
     if(r!=0||c!=0) return "Windows hat das Layout abgelehnt (Code "+r+"/"+c+")";
     if(move&&wins.Count>0){ Thread.Sleep(delay); Restore(wins,oldPrim,wasActive); Thread.Sleep(1500); Restore(wins,oldPrim,wasActive); }
