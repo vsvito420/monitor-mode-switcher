@@ -384,13 +384,25 @@ function Invoke-Mode([string]$name) {
     if (-not $m) { return "Modus '$name' nicht gefunden." }
     $d = @($m.displays | Where-Object { $_ })
     if (-not $d) { return "Modus '$name' enthält keine Monitore." }
-    # Fensterpositionen des bisherigen Modus merken - nur wenn gerade wirklich dessen Monitore an sind
+    # Bisherigen Modus aktualisieren - nur wenn gerade wirklich dessen Monitore an sind:
+    # in Windows geänderte Anordnung/Hauptanzeige übernehmen und Fensterpositionen merken
     $remember = [bool]$c.rememberWindows
-    if ($remember -and $c.lastMode -and $c.lastMode -ne $name) {
+    if ($c.lastMode -and $c.lastMode -ne $name) {
       $cur = $c.modes | Where-Object { $_.name -eq $c.lastMode } | Select-Object -First 1
+      $act = @([MMS]::List() | Where-Object Active)
       $want = @($cur.displays | ForEach-Object id | Sort-Object) -join ','
-      $have = @([MMS]::List() | Where-Object Active | ForEach-Object Id | Sort-Object) -join ','
-      if ($cur -and $want -eq $have) { Save-WindowLayout $c.lastMode ([MMS]::CaptureWindows()) }
+      $have = @($act | ForEach-Object Id | Sort-Object) -join ','
+      if ($cur -and $want -eq $have) {
+        $changed = $false
+        foreach ($d in $cur.displays) {
+          $a = $act | Where-Object { $_.Id -eq $d.id } | Select-Object -First 1
+          if ($d.x -ne $a.X -or $d.y -ne $a.Y -or $d.width -ne $a.W -or $d.height -ne $a.H -or [bool]$d.primary -ne $a.Primary) {
+            $d.x = $a.X; $d.y = $a.Y; $d.width = $a.W; $d.height = $a.H; $d.primary = $a.Primary; $changed = $true
+          }
+        }
+        if ($changed) { Write-Log "Anordnung für Modus '$($c.lastMode)' aus Windows übernommen" }
+        if ($remember) { Save-WindowLayout $c.lastMode ([MMS]::CaptureWindows()) }
+      }
     }
     $c.lastSwitch = [DateTime]::UtcNow.Ticks; Save-Config $c   # Audio-Wechsel während des Umschaltens sind keine Nutzerwahl
     $prim = [bool[]]($d | ForEach-Object { [bool]$_.primary })
@@ -723,7 +735,12 @@ if (-not $cfg0.modes) { $ni.ShowBalloonTip(4000, $AppName, 'Noch keine Modi. Rec
 
 # Beim Start: letzten Modus oder einen festen Modus herstellen
 $startMode = switch ($cfg0.startupAction) { 'last' { $cfg0.lastMode } 'mode' { $cfg0.startupMode } default { '' } }
-if ($startMode -and ($cfg0.modes | Where-Object { $_.name -eq $startMode })) {
+$sm = $cfg0.modes | Where-Object { $_.name -eq $startMode } | Select-Object -First 1
+if ($sm -and $cfg0.startupAction -eq 'last' -and
+    (@($sm.displays | ForEach-Object id | Sort-Object) -join ',') -eq (@([MMS]::List() | Where-Object Active | ForEach-Object Id | Sort-Object) -join ',')) {
+  $startMode = ''   # die richtigen Monitore sind schon an - Anordnung aus Windows nicht überschreiben
+}
+if ($startMode -and $sm) {
   $st = New-Object System.Windows.Forms.Timer; $st.Interval = 2000
   $st.Add_Tick({ $st.Stop(); Switch-WithTip $startMode }); $st.Start()
 }

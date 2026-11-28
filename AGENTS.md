@@ -57,6 +57,9 @@ Alternative: Hat der Nutzer ein Layout schon in Windows angeordnet, mit
   `"C:\Windows\System32\wscript.exe" "<voller Pfad>\MonitorModeSwitcher.vbs"` (wie die anderen Tools in `C:\Tools`).
   Am einfachsten: Einstellungen → „Mit Windows starten“. Eine alte Verknüpfung `Monitor Mode Switcher.lnk` im
   Autostart-Ordner wird beim Tray-Start automatisch umgestellt.
+- Ändert der Nutzer in Windows Anordnung oder Hauptanzeige, übernimmt die App das beim nächsten Wechsel in den
+  bisherigen Modus (nur wenn genau dessen Monitore an sind). `startupAction: "last"` stellt beim Start nichts um,
+  wenn schon die richtigen Monitore an sind.
 - `rememberWindows` (bool, Standard an): Vor jedem Wechsel merkt sich die App die genaue Position jedes Fensters im
   bisherigen Modus (`%APPDATA%\MonitorModeSwitcher\windows.json`) und setzt die Fenster beim Zurückwechseln in diesen
   Modus wieder dorthin. Gilt bis zur Abmeldung (Fenster-Handles); neue Fenster behandelt `moveWindows`.
